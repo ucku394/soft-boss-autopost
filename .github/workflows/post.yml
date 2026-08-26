@@ -2,8 +2,8 @@ name: Auto Post to Telegram
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # 9:00 по Москве (UTC+3)
-  workflow_dispatch:  # позволяет запускать вручную
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 jobs:
   post:
@@ -14,7 +14,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
           
       - name: Install dependencies
         run: pip install python-dotenv requests
