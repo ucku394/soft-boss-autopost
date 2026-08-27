@@ -43,9 +43,6 @@ HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_
 MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
 # АКТУАЛЬНЫЕ МОДЕЛИ GEMINI (август 2026)
-# gemini-3.6-flash — актуальная модель, рекомендованная самим API
-# gemini-flash-latest — алиас, который Google автоматически обновляет на новую версию
-# gemini-2.5-flash-lite — легкая версия как запасной вариант
 TEXT_MODELS = [
     "gemini-3.6-flash",       # Актуальная модель (рекомендована Google)
     "gemini-flash-latest",    # Алиас — всегда указывает на последнюю flash-модель
@@ -294,21 +291,26 @@ def generate_post():
 def generate_image(topic: str, rubric: str):
     """Получает качественное реальное фото с Unsplash по ключевым словам."""
     
-    clean_topic = "".join(c if c.isalnum() or c.isspace() else "" for c in topic)
-    
+    # Используем ТОЛЬКО короткие английские ключевые слова
+    # Unsplash не понимает длинные русские фразы
     base_keywords = [
         "minimalist workspace",
         "wooden desk",
         "office plants", 
         "coffee cup",
-        "notebook pen",
-        "soft natural light",
-        "hygge office"
+        "notebook",
+        "soft light",
+        "team meeting",
+        "business planning",
+        "leadership concept",
+        "scandinavian interior"
     ]
     
-    all_keywords = f"{clean_topic} {', '.join(base_keywords)}"
-    query = urllib.parse.quote(all_keywords)
+    # Выбираем 3-4 случайных ключевых слова для разнообразия фото
+    selected_keywords = random.sample(base_keywords, min(4, len(base_keywords)))
+    query = urllib.parse.quote(" ".join(selected_keywords))
     
+    # URL API Unsplash
     url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape&content_filter=high&w=1200&h=630&client_id={UNSPLASH_ACCESS_KEY}"
     
     headers = {
@@ -316,7 +318,7 @@ def generate_image(topic: str, rubric: str):
     }
     
     try:
-        logger.info(f"⏳ Ищем фото на Unsplash: {clean_topic[:50]}...")
+        logger.info(f"⏳ Ищем фото на Unsplash: {query}...")
         response = requests.get(url, headers=headers, timeout=(5, 15))
         
         if response.status_code == 200:
@@ -339,6 +341,30 @@ def generate_image(topic: str, rubric: str):
         elif response.status_code == 401:
             logger.error("❌ Неверный UNSPLASH_ACCESS_KEY! Проверьте ключ в .env или Secrets GitHub.")
             return None
+            
+        elif response.status_code == 404:
+            logger.warning("⚠️ Unsplash не нашел фото по запросу. Пробуем fallback...")
+            # Fallback: пробуем самый простой запрос
+            fallback_queries = ["workspace", "office desk", "business meeting", "planning"]
+            for fallback_query in fallback_queries:
+                fallback_url = f"https://api.unsplash.com/photos/random?query={fallback_query}&orientation=landscape&content_filter=high&w=1200&h=630&client_id={UNSPLASH_ACCESS_KEY}"
+                try:
+                    fallback_response = requests.get(fallback_url, headers=headers, timeout=(5, 15))
+                    if fallback_response.status_code == 200:
+                        data = fallback_response.json()
+                        image_url = data.get("urls", {}).get("regular")
+                        if image_url:
+                            img_response = requests.get(image_url, timeout=(5, 15))
+                            if img_response.status_code == 200 and len(img_response.content) > 1000:
+                                photographer = data.get('user', {}).get('name', 'Unknown')
+                                logger.info(f"✅ Фото найдено (fallback: {fallback_query}): {len(img_response.content)} байт (Автор: {photographer})")
+                                return img_response.content
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка fallback запроса '{fallback_query}': {e}")
+                    continue
+            logger.warning("⚠️ Все fallback запросы не дали результата")
+            return None
+            
         elif response.status_code == 429:
             logger.warning("⚠️ Превышен лимит запросов к Unsplash API (50 в час)")
             return None
