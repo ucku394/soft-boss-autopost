@@ -42,10 +42,13 @@ if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY]):
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_history.json')
 MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
-# МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI (текст)
+# АКТУАЛЬНЫЕ МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI (текст)
+# Порядок важен: сначала проверенные, потом новые
 TEXT_MODELS = [
-    "gemini-2.5-flash",      # Основная — быстрая, стабильная, free tier
-    "gemini-2.5-pro",        # Fallback — лучшее качество, но медленнее
+    "gemini-3.5-flash",      # Проверено — работает стабильно на free tier
+    "gemini-1.5-flash",      # Старая, но надёжная fallback
+    "gemini-3.6-flash",      # Новая, но может давать 503
+    "gemini-3.1-pro-preview", # Для сложного текста, если flash не справляется
 ]
 
 # =============================================================================
