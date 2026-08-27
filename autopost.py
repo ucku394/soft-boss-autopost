@@ -259,12 +259,12 @@ def generate_post():
     for model in TEXT_MODELS:
         text = call_gemini_text(model, prompt_text)
         if text:
-            # Страховка: если текст всё же длиннее лимита подписи Telegram (1024), обрезаем его аккуратно
+            # Жёстко обрезаем текст под лимит Telegram (1024 символа для подписи к фото)
             if len(text) > 1024:
-                logger.warning(f"⚠️ Сгенерированный текст ({len(text)} симв.) превысил лимит подписи. Обрезаем до 1020 символов.")
+                logger.warning(f"⚠️ Текст от модели слишком длинный ({len(text)} симв.). Обрезаем до 1020 символов для вместимости с фото.")
                 text = text[:1020].rsplit(' ', 1)[0] + "…"
 
-            logger.info(f"✅ Текст сгенерирован через {model}: {len(text)} символов")
+            logger.info(f"✅ Текст готов: {len(text)} символов")
             return text, topic, day_data["rubric"]
 
     logger.error("❌ Все текстовые модели вернули пустой/короткий текст")
