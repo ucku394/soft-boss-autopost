@@ -43,12 +43,11 @@ HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_
 MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
 # АКТУАЛЬНЫЕ МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI (текст)
-# Порядок важен: сначала проверенные, потом новые
 TEXT_MODELS = [
     "gemini-3.5-flash",      # Проверено — работает стабильно на free tier
     "gemini-1.5-flash",      # Старая, но надёжная fallback
     "gemini-3.6-flash",      # Новая, но может давать 503
-    "gemini-3.1-pro-preview", # Для сложного текста, если flash не справляется
+    "gemini-3.1-pro-preview", # Для сложного текста
 ]
 
 # =============================================================================
@@ -199,13 +198,10 @@ def get_prompt_for_today():
 
 
 def get_image_prompt(topic: str, rubric: str) -> str:
-    """Промпт для генерации обложки поста — деловая иллюстрация без текста на картинке."""
-    return f"""Minimalist flat design business illustration for a Telegram post about management and leadership.
-
-Theme: {topic} (category: {rubric})
-Style: modern flat 3D render, corporate color palette (blue, graphite, warm accent), clean composition, no photorealistic close-ups of people.
-CRITICAL: NO text, NO letters, NO numbers, NO words on the image.
-Format: horizontal, suitable for Telegram post cover."""
+    """Короткий промпт для Pollinations.ai — чем короче, тем лучше."""
+    # Укорачиваем до сути, чтобы не превысить лимит URL
+    short_topic = topic.split('—')[0].split('(')[0].strip()[:60]
+    return f"Minimalist flat business illustration, {short_topic}, corporate blue and warm accent colors, clean composition, no text, no letters, no numbers, no words, flat 3D style, horizontal banner"
 
 
 # =============================================================================
@@ -271,43 +267,52 @@ def generate_post():
 
 
 # =============================================================================
-# POLLINATIONS.AI — ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (ЗАМЕНА GEMINI IMAGE)
+# POLLINATIONS.AI — ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
 # =============================================================================
 def generate_image(topic: str, rubric: str):
-    """Генерирует картинку через Pollinations.ai (бесплатно, без квот). Возвращает байты или None."""
+    """Генерирует картинку через Pollinations.ai. Возвращает байты или None."""
     image_prompt = get_image_prompt(topic, rubric)
     
-    # Кодируем промпт для URL
+    # Кодируем промпт
     encoded_prompt = urllib.parse.quote(image_prompt)
     
-    # Параметры для Pollinations.ai
+    # Базовый URL
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    
+    # Параметры — ТОЛЬКО поддерживаемые Pollinations.ai
     params = {
         "width": 1200,
         "height": 630,
         "seed": random.randint(1, 999999),
-        "nologo": "true",      # Убираем водяной знак
-        "model": "flux",       # Лучшая бесплатная модель
-        "safe": "true",        # Безопасный режим
-        "enhance": "false",    # Не усиливаем промпт (у нас уже хороший)
+        "nologo": "true",
+        "model": "flux",
     }
     
-    query_string = "&".join(f"{k}={v}" for k, v in params.items())
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?{query_string}"
-    
     try:
-        logger.info(f"⏳ Генерируем картинку через Pollinations.ai (flux)...")
-        response = requests.get(url, timeout=(10, 90))
+        logger.info(f"⏳ Генерируем картинку через Pollinations.ai...")
+        logger.info(f"   URL: {url[:100]}...")
+        logger.info(f"   Параметры: {params}")
         
-        if response.status_code == 200:
-            image_bytes = response.content
-            logger.info(f"✅ Картинка сгенерирована: {len(image_bytes)} байт")
-            return image_bytes
+        # Используем params= для правильной сборки URL
+        response = requests.get(url, params=params, timeout=(15, 120))
+        
+        logger.info(f"   Ответ: HTTP {response.status_code}, {len(response.content)} байт")
+        
+        if response.status_code == 200 and len(response.content) > 1000:
+            # Проверяем, что это действительно картинка, а не HTML-ошибка
+            content_type = response.headers.get('Content-Type', '')
+            if 'image' in content_type or response.content[:4] in [b'\xff\xd8\xff\xe0', b'\x89PNG', b'RIFF']:
+                logger.info(f"✅ Картинка сгенерирована: {len(response.content)} байт, тип: {content_type}")
+                return response.content
+            else:
+                logger.warning(f"⚠️ Ответ не является изображением. Content-Type: {content_type}")
+                return None
         else:
-            logger.warning(f"⚠️ Pollinations.ai HTTP {response.status_code}: {response.text[:300]}")
+            logger.warning(f"⚠️ Pollinations.ai HTTP {response.status_code}, тело: {response.text[:300]}")
             return None
             
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка генерации картинки через Pollinations.ai: {e}")
+        logger.warning(f"⚠️ Ошибка генерации картинки: {e}")
         return None
 
 
