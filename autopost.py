@@ -8,6 +8,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 import requests
 
+# =============================================================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ
+# =============================================================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -18,6 +21,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# =============================================================================
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
@@ -25,16 +31,32 @@ TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID', '').strip()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
 
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY]):
-    logger.error("❌ Не все переменные заданы!")
+    logger.error("❌ Не все переменные заданы! Проверь .env файл:")
+    logger.error("   TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY")
     sys.exit(1)
 
-# Файл, где хранится история уже опубликованных подтем — чтобы не повторяться
+# =============================================================================
+# КОНФИГУРАЦИЯ
+# =============================================================================
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_history.json')
+MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
-# Сколько последних публикаций по каждому дню недели помнить,
-# прежде чем подтема может быть использована повторно
-MEMORY_DEPTH = 4  # т.е. подтема не повторится ближайшие ~4 недели
+# МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI
+# Текст: gemini-2.5-flash — самая стабильная, быстрая, free tier
+# Изображения: gemini-3.1-flash-image (Nano Banana 2) или gemini-2.5-flash-image
+TEXT_MODELS = [
+    "gemini-2.5-flash",      # Основная — быстрая, стабильная, free tier
+    "gemini-2.5-pro",        # Fallback — лучшее качество, но медленнее
+]
 
+IMAGE_MODELS = [
+    "gemini-3.1-flash-image",  # Nano Banana 2 — GA, free tier, рекомендуется
+    "gemini-2.5-flash-image",  # Nano Banana — GA, 500 RPD free, fallback
+]
+
+# =============================================================================
+# ТЕМЫ ПО ДНЯМ НЕДЕЛИ
+# =============================================================================
 THEMES = {
     0: {
         "rubric": "Мотивация недели / фокус",
@@ -114,7 +136,9 @@ THEMES = {
     },
 }
 
-
+# =============================================================================
+# РАБОТА С ИСТОРИЕЙ
+# =============================================================================
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
@@ -142,16 +166,14 @@ def pick_topic(weekday: int) -> str:
     key = str(weekday)
     recent = history.get(key, [])
 
-    # Кандидаты — те, что не встречались среди последних MEMORY_DEPTH публикаций
     candidates = [t for t in pool if t not in recent[-MEMORY_DEPTH:]]
     if not candidates:
-        # Пул исчерпан — сбрасываем память по этому дню и берём заново
         candidates = pool
 
     topic = random.choice(candidates)
 
     recent.append(topic)
-    history[key] = recent[-MEMORY_DEPTH * 2:]  # не даём файлу расти бесконечно
+    history[key] = recent[-MEMORY_DEPTH * 2:]
     save_history(history)
 
     return topic
@@ -190,7 +212,11 @@ def get_image_prompt(topic: str, rubric: str) -> str:
 Формат: горизонтальный, подходит под обложку Telegram-поста."""
 
 
-def call_gemini(model_name, prompt_text):
+# =============================================================================
+# GEMINI API — ГЕНЕРАЦИЯ ТЕКСТА
+# =============================================================================
+def call_gemini_text(model_name: str, prompt_text: str):
+    """Запрашивает текст у Gemini. Возвращает текст или None."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
@@ -202,21 +228,22 @@ def call_gemini(model_name, prompt_text):
     }
 
     try:
-        logger.info(f"⏳ Пробуем {model_name}...")
+        logger.info(f"⏳ Пробуем {model_name} для текста...")
         response = requests.post(url, json=payload, timeout=(10, 60))
         data = response.json()
 
         if response.status_code != 200:
-            logger.warning(f"⚠️ {model_name} HTTP {response.status_code}")
+            logger.warning(f"⚠️ {model_name} HTTP {response.status_code}: {json.dumps(data, ensure_ascii=False)[:400]}")
             return None
 
         candidates = data.get("candidates", [])
         if not candidates:
+            logger.warning(f"⚠️ {model_name}: пустой candidates")
             return None
 
-        # ⬇️ БЕРЁМ ТОЛЬКО parts[0] — основной текст, игнорируем thoughtSignature в parts[1]
         parts = candidates[0].get("content", {}).get("parts", [])
         if not parts:
+            logger.warning(f"⚠️ {model_name}: пустой parts")
             return None
 
         text = parts[0].get("text", "")
@@ -236,29 +263,30 @@ def call_gemini(model_name, prompt_text):
 def generate_post():
     """Возвращает (текст_поста, тема, рубрика) или (None, None, None) при неудаче."""
     prompt_text, topic, day_data = get_prompt_for_today()
-    models = ["gemini-3.6-flash", "gemini-3.5-flash"]
 
-    for model in models:
-        text = call_gemini(model, prompt_text)
+    for model in TEXT_MODELS:
+        text = call_gemini_text(model, prompt_text)
         if text:
-            logger.info(f"✅ Используем {model}: {len(text)} символов")
+            logger.info(f"✅ Текст сгенерирован через {model}: {len(text)} символов")
             return text, topic, day_data["rubric"]
 
-    logger.error("❌ Все модели вернули пустой/короткий текст")
+    logger.error("❌ Все текстовые модели вернули пустой/короткий текст")
     return None, None, None
 
 
+# =============================================================================
+# GEMINI API — ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+# =============================================================================
 def generate_image(topic: str, rubric: str):
     """Генерирует картинку через Gemini image-модель. Возвращает байты PNG/JPEG или None."""
-    models = ["gemini-3-pro-image-preview", "gemini-2.5-flash-image"]
     image_prompt = get_image_prompt(topic, rubric)
 
-    for model_name in models:
+    for model_name in IMAGE_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{"parts": [{"text": image_prompt}]}],
             "generationConfig": {
-                "responseModalities": ["IMAGE"]
+                "responseModalities": ["TEXT", "IMAGE"]  # ОБА модальности обязательны!
             }
         }
         try:
@@ -266,23 +294,37 @@ def generate_image(topic: str, rubric: str):
             response = requests.post(url, json=payload, timeout=(10, 90))
             data = response.json()
 
+            # Детальное логирование ошибок
             if response.status_code != 200:
-                logger.warning(f"⚠️ {model_name} (image) HTTP {response.status_code}: {data}")
+                logger.warning(
+                    f"⚠️ {model_name} HTTP {response.status_code}: "
+                    f"{json.dumps(data, ensure_ascii=False)[:600]}"
+                )
                 continue
 
             candidates = data.get("candidates", [])
             if not candidates:
+                logger.warning(
+                    f"⚠️ {model_name}: пустой candidates, ответ: "
+                    f"{json.dumps(data, ensure_ascii=False)[:400]}"
+                )
                 continue
 
             parts = candidates[0].get("content", {}).get("parts", [])
+            image_found = False
+
             for part in parts:
-                inline_data = part.get("inlineData") or part.get("inline_data")
+                inline_data = part.get("inlineData")
                 if inline_data and inline_data.get("data"):
                     image_bytes = base64.b64decode(inline_data["data"])
                     logger.info(f"✅ Картинка сгенерирована через {model_name}: {len(image_bytes)} байт")
                     return image_bytes
+                # Если в parts есть текст — тоже логируем (может быть описание ошибки)
+                elif part.get("text"):
+                    logger.info(f"ℹ️ {model_name} вернул текст: {part.get('text')[:200]}")
 
-            logger.warning(f"⚠️ {model_name}: в ответе нет inlineData")
+            if not image_found:
+                logger.warning(f"⚠️ {model_name}: в ответе нет inlineData, parts={len(parts)}")
 
         except Exception as e:
             logger.warning(f"⚠️ Ошибка генерации картинки через {model_name}: {e}")
@@ -291,7 +333,10 @@ def generate_image(topic: str, rubric: str):
     return None
 
 
-TELEGRAM_CAPTION_LIMIT = 1024  # ограничение Telegram на подпись к фото
+# =============================================================================
+# TELEGRAM — ПУБЛИКАЦИЯ
+# =============================================================================
+TELEGRAM_CAPTION_LIMIT = 1024
 
 
 def publish_to_telegram(text):
@@ -361,11 +406,15 @@ def publish_photo_to_telegram(image_bytes: bytes, text: str):
         return False
 
 
+# =============================================================================
+# ГЛАВНЫЙ ЦИКЛ
+# =============================================================================
 def main():
-    logger.info("🚀 Запуск...")
+    logger.info("🚀 Запуск автопостинга...")
 
     post_text, topic, rubric = generate_post()
     if not post_text:
+        logger.error("❌ Не удалось сгенерировать текст поста. Завершение.")
         sys.exit(1)
 
     image_bytes = generate_image(topic, rubric)
@@ -377,9 +426,10 @@ def main():
         success = publish_to_telegram(post_text)
 
     if not success:
+        logger.error("❌ Не удалось опубликовать пост. Завершение.")
         sys.exit(1)
 
-    logger.info("🎉 Готово!")
+    logger.info("🎉 Готово! Пост успешно опубликован.")
 
 
 if __name__ == "__main__":
