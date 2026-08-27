@@ -4,6 +4,7 @@ import json
 import random
 import base64
 import logging
+import urllib.parse
 from datetime import datetime
 from dotenv import load_dotenv
 import requests
@@ -41,17 +42,10 @@ if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY]):
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_history.json')
 MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
-# МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI
-# Текст: gemini-2.5-flash — самая стабильная, быстрая, free tier
-# Изображения: gemini-3.1-flash-image (Nano Banana 2) или gemini-2.5-flash-image
+# МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI (текст)
 TEXT_MODELS = [
     "gemini-2.5-flash",      # Основная — быстрая, стабильная, free tier
     "gemini-2.5-pro",        # Fallback — лучшее качество, но медленнее
-]
-
-IMAGE_MODELS = [
-    "gemini-3.1-flash-image",  # Nano Banana 2 — GA, free tier, рекомендуется
-    "gemini-2.5-flash-image",  # Nano Banana — GA, 500 RPD free, fallback
 ]
 
 # =============================================================================
@@ -203,13 +197,12 @@ def get_prompt_for_today():
 
 def get_image_prompt(topic: str, rubric: str) -> str:
     """Промпт для генерации обложки поста — деловая иллюстрация без текста на картинке."""
-    return f"""Создай минималистичную деловую иллюстрацию для обложки поста в Telegram-канале о менеджменте и лидерстве.
+    return f"""Minimalist flat design business illustration for a Telegram post about management and leadership.
 
-Тематика поста: {topic} (рубрика: {rubric})
-
-Стиль: современный плоский флэт-дизайн или мягкий 3D-рендер, деловая палитра (синий, графитовый, тёплый акцентный цвет), сдержанная композиция, без фотореализма людей крупным планом.
-Важно: НИКАКОГО текста, надписей, букв или цифр на изображении.
-Формат: горизонтальный, подходит под обложку Telegram-поста."""
+Theme: {topic} (category: {rubric})
+Style: modern flat 3D render, corporate color palette (blue, graphite, warm accent), clean composition, no photorealistic close-ups of people.
+CRITICAL: NO text, NO letters, NO numbers, NO words on the image.
+Format: horizontal, suitable for Telegram post cover."""
 
 
 # =============================================================================
@@ -275,62 +268,44 @@ def generate_post():
 
 
 # =============================================================================
-# GEMINI API — ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+# POLLINATIONS.AI — ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (ЗАМЕНА GEMINI IMAGE)
 # =============================================================================
 def generate_image(topic: str, rubric: str):
-    """Генерирует картинку через Gemini image-модель. Возвращает байты PNG/JPEG или None."""
+    """Генерирует картинку через Pollinations.ai (бесплатно, без квот). Возвращает байты или None."""
     image_prompt = get_image_prompt(topic, rubric)
-
-    for model_name in IMAGE_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": image_prompt}]}],
-            "generationConfig": {
-                "responseModalities": ["TEXT", "IMAGE"]  # ОБА модальности обязательны!
-            }
-        }
-        try:
-            logger.info(f"⏳ Генерируем картинку через {model_name}...")
-            response = requests.post(url, json=payload, timeout=(10, 90))
-            data = response.json()
-
-            # Детальное логирование ошибок
-            if response.status_code != 200:
-                logger.warning(
-                    f"⚠️ {model_name} HTTP {response.status_code}: "
-                    f"{json.dumps(data, ensure_ascii=False)[:600]}"
-                )
-                continue
-
-            candidates = data.get("candidates", [])
-            if not candidates:
-                logger.warning(
-                    f"⚠️ {model_name}: пустой candidates, ответ: "
-                    f"{json.dumps(data, ensure_ascii=False)[:400]}"
-                )
-                continue
-
-            parts = candidates[0].get("content", {}).get("parts", [])
-            image_found = False
-
-            for part in parts:
-                inline_data = part.get("inlineData")
-                if inline_data and inline_data.get("data"):
-                    image_bytes = base64.b64decode(inline_data["data"])
-                    logger.info(f"✅ Картинка сгенерирована через {model_name}: {len(image_bytes)} байт")
-                    return image_bytes
-                # Если в parts есть текст — тоже логируем (может быть описание ошибки)
-                elif part.get("text"):
-                    logger.info(f"ℹ️ {model_name} вернул текст: {part.get('text')[:200]}")
-
-            if not image_found:
-                logger.warning(f"⚠️ {model_name}: в ответе нет inlineData, parts={len(parts)}")
-
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка генерации картинки через {model_name}: {e}")
-
-    logger.error("❌ Не удалось сгенерировать картинку ни одной моделью")
-    return None
+    
+    # Кодируем промпт для URL
+    encoded_prompt = urllib.parse.quote(image_prompt)
+    
+    # Параметры для Pollinations.ai
+    params = {
+        "width": 1200,
+        "height": 630,
+        "seed": random.randint(1, 999999),
+        "nologo": "true",      # Убираем водяной знак
+        "model": "flux",       # Лучшая бесплатная модель
+        "safe": "true",        # Безопасный режим
+        "enhance": "false",    # Не усиливаем промпт (у нас уже хороший)
+    }
+    
+    query_string = "&".join(f"{k}={v}" for k, v in params.items())
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?{query_string}"
+    
+    try:
+        logger.info(f"⏳ Генерируем картинку через Pollinations.ai (flux)...")
+        response = requests.get(url, timeout=(10, 90))
+        
+        if response.status_code == 200:
+            image_bytes = response.content
+            logger.info(f"✅ Картинка сгенерирована: {len(image_bytes)} байт")
+            return image_bytes
+        else:
+            logger.warning(f"⚠️ Pollinations.ai HTTP {response.status_code}: {response.text[:300]}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка генерации картинки через Pollinations.ai: {e}")
+        return None
 
 
 # =============================================================================
