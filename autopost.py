@@ -44,9 +44,9 @@ MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4
 
 # АКТУАЛЬНЫЕ МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI (текст)
 TEXT_MODELS = [
-    "gemini-3.5-flash",      # Проверено — работает стабильно на free tier
-    "gemini-1.5-flash",      # Старая, но надёжная fallback
-    "gemini-3.6-flash",      # Новая, но может давать 503
+    "gemini-3.5-flash",       # Проверено — работает стабильно на free tier
+    "gemini-1.5-flash",       # Старая, но надёжная fallback
+    "gemini-3.6-flash",       # Новая, но может давать 503
     "gemini-3.1-pro-preview", # Для сложного текста
 ]
 
@@ -199,7 +199,6 @@ def get_prompt_for_today():
 
 def get_image_prompt(topic: str, rubric: str) -> str:
     """Короткий промпт для Pollinations.ai — чем короче, тем лучше."""
-    # Укорачиваем до сути, чтобы не превысить лимит URL
     short_topic = topic.split('—')[0].split('(')[0].strip()[:60]
     return f"Minimalist flat business illustration, {short_topic}, corporate blue and warm accent colors, clean composition, no text, no letters, no numbers, no words, flat 3D style, horizontal banner"
 
@@ -273,13 +272,9 @@ def generate_image(topic: str, rubric: str):
     """Генерирует картинку через Pollinations.ai. Возвращает байты или None."""
     image_prompt = get_image_prompt(topic, rubric)
     
-    # Кодируем промпт
     encoded_prompt = urllib.parse.quote(image_prompt)
-    
-    # Базовый URL
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
     
-    # Параметры — ТОЛЬКО поддерживаемые Pollinations.ai
     params = {
         "width": 1200,
         "height": 630,
@@ -290,16 +285,9 @@ def generate_image(topic: str, rubric: str):
     
     try:
         logger.info(f"⏳ Генерируем картинку через Pollinations.ai...")
-        logger.info(f"   URL: {url[:100]}...")
-        logger.info(f"   Параметры: {params}")
-        
-        # Используем params= для правильной сборки URL
         response = requests.get(url, params=params, timeout=(15, 120))
         
-        logger.info(f"   Ответ: HTTP {response.status_code}, {len(response.content)} байт")
-        
         if response.status_code == 200 and len(response.content) > 1000:
-            # Проверяем, что это действительно картинка, а не HTML-ошибка
             content_type = response.headers.get('Content-Type', '')
             if 'image' in content_type or response.content[:4] in [b'\xff\xd8\xff\xe0', b'\x89PNG', b'RIFF']:
                 logger.info(f"✅ Картинка сгенерирована: {len(response.content)} байт, тип: {content_type}")
@@ -308,7 +296,7 @@ def generate_image(topic: str, rubric: str):
                 logger.warning(f"⚠️ Ответ не является изображением. Content-Type: {content_type}")
                 return None
         else:
-            logger.warning(f"⚠️ Pollinations.ai HTTP {response.status_code}, тело: {response.text[:300]}")
+            logger.warning(f"⚠️ Pollinations.ai HTTP {response.status_code}")
             return None
             
     except Exception as e:
@@ -323,7 +311,7 @@ TELEGRAM_CAPTION_LIMIT = 1024
 
 
 def publish_to_telegram(text):
-    """Публикует обычное текстовое сообщение (fallback, если картинка не сгенерировалась)."""
+    """Публикует обычное текстовое сообщение."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHANNEL_ID,
@@ -350,21 +338,22 @@ def publish_to_telegram(text):
 
 def publish_photo_to_telegram(image_bytes: bytes, text: str):
     """
-    Публикует фото с подписью. Если текст длиннее лимита caption (1024 симв.),
-    отправляет фото с обрезанной подписью, а затем полный текст отдельным сообщением.
+    Публикует фото с подписью, если текст влезает в лимит Telegram (1024 символа).
+    Если текст длиннее лимита — картинка не отправляется, публикуется только текст.
     """
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-
-    caption = text
-    send_full_text_separately = False
     if len(text) > TELEGRAM_CAPTION_LIMIT:
-        caption = text[:TELEGRAM_CAPTION_LIMIT - 1] + "…"
-        send_full_text_separately = True
+        logger.warning(
+            f"⚠️ Текст слишком длинный для подписи к фото ({len(text)} > {TELEGRAM_CAPTION_LIMIT}). "
+            "Отменяем отправку картинки и публикуем только текст."
+        )
+        return publish_to_telegram(text)
 
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    
     files = {"photo": ("cover.png", image_bytes, "image/png")}
     data = {
         "chat_id": TELEGRAM_CHANNEL_ID,
-        "caption": caption,
+        "caption": text,
         "parse_mode": "HTML",
     }
 
@@ -374,15 +363,10 @@ def publish_photo_to_telegram(image_bytes: bytes, text: str):
 
         if response.status_code == 200 and resp_json.get("ok"):
             logger.info(f"✅ Пост с картинкой опубликован! Message ID: {resp_json['result']['message_id']}")
+            return True
         else:
             logger.error(f"❌ Ошибка отправки фото в Telegram: {resp_json}")
             return False
-
-        if send_full_text_separately:
-            logger.info("ℹ️ Текст длиннее лимита подписи — отправляем полный текст отдельным сообщением")
-            publish_to_telegram(text)
-
-        return True
 
     except Exception as e:
         logger.error(f"❌ Ошибка отправки фото: {e}")
