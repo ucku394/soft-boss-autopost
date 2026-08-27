@@ -56,7 +56,7 @@ TEXT_MODELS = [
 THEMES = {
     0: {
         "rubric": "Мотивация недели / фокус",
-        "format_hint": "короткий заряжающий пост, задаёт тон неделе, 150-250 слов",
+        "format_hint": "короткий заряжающий пост, задаёт тон неделе",
         "topics": [
             "Одна метрика, на которую стоит смотреть эту неделю",
             "Вредная привычка руководителя, от которой стоит отказаться на 7 дней",
@@ -67,7 +67,7 @@ THEMES = {
     },
     1: {
         "rubric": "Инструмент / шаблон",
-        "format_hint": "практический инструмент с конкретными шагами, который можно сразу применить",
+        "format_hint": "практический инструмент с конкретными шагами",
         "topics": [
             "Матрица приоритизации задач руководителя",
             "Шаблон one-to-one встречи с сотрудником",
@@ -112,7 +112,7 @@ THEMES = {
     },
     5: {
         "rubric": "Лёгкий формат",
-        "format_hint": "развлекательно-полезный контент под выходной день, без давления",
+        "format_hint": "развлекательно-полезный контент под выходной день",
         "topics": [
             "5 книг, изменивших подход к управлению",
             "Подборка привычек эффективных руководителей",
@@ -180,19 +180,20 @@ def get_prompt_for_today():
     day_data = THEMES[weekday]
     topic = pick_topic(weekday)
 
-    prompt = f"""Напиши пост для Telegram-канала @soft_boss про лидерство и управление командой для руководителей среднего звена.
+    prompt = f"""Напиши короткий пост для Telegram-канала @soft_boss про лидерство и управление командой для руководителей среднего звена.
 
 Рубрика дня: {day_data['rubric']}
 Формат: {day_data['format_hint']}
 Конкретная тема поста: {topic}
 
-Требования:
-- 200-350 слов (для коротких форматов допустимо 100-150 слов)
-- 3-5 эмодзи
-- 2-3 хэштега в конце
-- Призыв к действию или вопрос аудитории в конце
-- HTML-теги: <b>жирный</b>, <i>курсив</i>
-- Только готовый текст, без пояснений
+СТРОГИЕ ТРЕБОВАНИЯ К ДЛИНЕ:
+- Общая длина текста ДОЛЖНА БЫТЬ СТРОГО МЕНЬШЕ 950 символов (включая пробелы и эмодзи), чтобы текст гарантированно поместился в подпись к картинке Telegram.
+- 120-170 слов максимум.
+- 2-3 эмодзи.
+- 1-2 хэштега в конце.
+- Короткий призыв к действию или вопрос аудитории в конце.
+- HTML-теги: <b>жирный</b>, <i>курсив</i>.
+- Только готовый текст, без пояснений.
 """
     return prompt, topic, day_data
 
@@ -213,8 +214,8 @@ def call_gemini_text(model_name: str, prompt_text: str):
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
-            "temperature": 0.9,
-            "maxOutputTokens": 4000
+            "temperature": 0.8,
+            "maxOutputTokens": 1500
         }
     }
 
@@ -237,12 +238,12 @@ def call_gemini_text(model_name: str, prompt_text: str):
             logger.warning(f"⚠️ {model_name}: пустой parts")
             return None
 
-        text = parts[0].get("text", "")
+        text = parts[0].get("text", "").strip()
         finish_reason = candidates[0].get("finishReason", "UNKNOWN")
 
         logger.info(f"📊 {model_name}: finishReason={finish_reason}, длина={len(text)}")
 
-        if text and len(text) > 30:
+        if text and len(text) > 20:
             return text
         return None
 
@@ -258,6 +259,11 @@ def generate_post():
     for model in TEXT_MODELS:
         text = call_gemini_text(model, prompt_text)
         if text:
+            # Страховка: если текст всё же длиннее лимита подписи Telegram (1024), обрезаем его аккуратно
+            if len(text) > 1024:
+                logger.warning(f"⚠️ Сгенерированный текст ({len(text)} симв.) превысил лимит подписи. Обрезаем до 1020 символов.")
+                text = text[:1020].rsplit(' ', 1)[0] + "…"
+
             logger.info(f"✅ Текст сгенерирован через {model}: {len(text)} символов")
             return text, topic, day_data["rubric"]
 
@@ -307,11 +313,8 @@ def generate_image(topic: str, rubric: str):
 # =============================================================================
 # TELEGRAM — ПУБЛИКАЦИЯ
 # =============================================================================
-TELEGRAM_CAPTION_LIMIT = 1024
-
-
 def publish_to_telegram(text):
-    """Публикует обычное текстовое сообщение."""
+    """Публикует обычное текстовое сообщение (fallback, если картинка не сгенерировалась)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHANNEL_ID,
@@ -337,17 +340,7 @@ def publish_to_telegram(text):
 
 
 def publish_photo_to_telegram(image_bytes: bytes, text: str):
-    """
-    Публикует фото с подписью, если текст влезает в лимит Telegram (1024 символа).
-    Если текст длиннее лимита — картинка не отправляется, публикуется только текст.
-    """
-    if len(text) > TELEGRAM_CAPTION_LIMIT:
-        logger.warning(
-            f"⚠️ Текст слишком длинный для подписи к фото ({len(text)} > {TELEGRAM_CAPTION_LIMIT}). "
-            "Отменяем отправку картинки и публикуем только текст."
-        )
-        return publish_to_telegram(text)
-
+    """Публикует фото вместе с текстом в качестве единой подписи (caption)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     
     files = {"photo": ("cover.png", image_bytes, "image/png")}
@@ -362,7 +355,7 @@ def publish_photo_to_telegram(image_bytes: bytes, text: str):
         resp_json = response.json()
 
         if response.status_code == 200 and resp_json.get("ok"):
-            logger.info(f"✅ Пост с картинкой опубликован! Message ID: {resp_json['result']['message_id']}")
+            logger.info(f"✅ Пост с картинкой и текстом опубликован единым сообщением! Message ID: {resp_json['result']['message_id']}")
             return True
         else:
             logger.error(f"❌ Ошибка отправки фото в Telegram: {resp_json}")
