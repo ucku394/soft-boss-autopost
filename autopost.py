@@ -42,10 +42,11 @@ if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, UNSPLASH_AC
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_history.json')
 MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
-# АКТУАЛЬНЫЕ МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI (текст)
+# АКТУАЛЬНЫЕ МОДЕЛИ GEMINI (август 2026)
 TEXT_MODELS = [
-    "gemini-1.5-flash",       # Стабильная и быстрая
-    "gemini-1.5-pro",         # Для более качественного текста
+    "gemini-2.0-flash",       # Быстрая и стабильная (рекомендуется)
+    "gemini-2.0-pro",         # Более мощная для сложных задач
+    "gemini-2.5-flash",       # Новая версия flash
 ]
 
 # =============================================================================
@@ -198,6 +199,29 @@ def get_prompt_for_today():
 # =============================================================================
 # GEMINI API — ГЕНЕРАЦИЯ ТЕКСТА
 # =============================================================================
+def get_available_models():
+    """Получает список доступных моделей Gemini через API (опционально)."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    
+    try:
+        response = requests.get(url, timeout=(5, 15))
+        if response.status_code == 200:
+            data = response.json()
+            models = data.get("models", [])
+            # Фильтруем только модели, поддерживающие generateContent
+            available = [
+                m["name"].replace("models/", "") 
+                for m in models 
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+            logger.info(f"📋 Доступные модели Gemini: {', '.join(available[:10])}")
+            return available
+        return []
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось получить список моделей: {e}")
+        return []
+
+
 def call_gemini_text(model_name: str, prompt_text: str):
     """Запрашивает текст у Gemini. Возвращает текст или None."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
@@ -395,6 +419,11 @@ def publish_photo_to_telegram(image_bytes: bytes, text: str):
 # =============================================================================
 def main():
     logger.info("🚀 Запуск автопостинга...")
+    
+    # Опционально: получаем список доступных моделей при запуске
+    available = get_available_models()
+    if available:
+        logger.info(f"📋 Найдено {len(available)} доступных моделей Gemini")
 
     post_text, topic, rubric = generate_post()
     if not post_text:
