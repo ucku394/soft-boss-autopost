@@ -43,10 +43,13 @@ HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_
 MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
 # АКТУАЛЬНЫЕ МОДЕЛИ GEMINI (август 2026)
+# gemini-3.6-flash — актуальная модель, рекомендованная самим API
+# gemini-flash-latest — алиас, который Google автоматически обновляет на новую версию
+# gemini-2.5-flash-lite — легкая версия как запасной вариант
 TEXT_MODELS = [
-    "gemini-2.0-flash",       # Быстрая и стабильная (рекомендуется)
-    "gemini-2.0-pro",         # Более мощная для сложных задач
-    "gemini-2.5-flash",       # Новая версия flash
+    "gemini-3.6-flash",       # Актуальная модель (рекомендована Google)
+    "gemini-flash-latest",    # Алиас — всегда указывает на последнюю flash-модель
+    "gemini-2.5-flash-lite",  # Легкая версия как fallback
 ]
 
 # =============================================================================
@@ -200,7 +203,7 @@ def get_prompt_for_today():
 # GEMINI API — ГЕНЕРАЦИЯ ТЕКСТА
 # =============================================================================
 def get_available_models():
-    """Получает список доступных моделей Gemini через API (опционально)."""
+    """Получает список доступных моделей Gemini через API."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
     
     try:
@@ -208,7 +211,6 @@ def get_available_models():
         if response.status_code == 200:
             data = response.json()
             models = data.get("models", [])
-            # Фильтруем только модели, поддерживающие generateContent
             available = [
                 m["name"].replace("models/", "") 
                 for m in models 
@@ -240,7 +242,8 @@ def call_gemini_text(model_name: str, prompt_text: str):
         data = response.json()
 
         if response.status_code != 200:
-            logger.warning(f"⚠️ {model_name} HTTP {response.status_code}: {json.dumps(data, ensure_ascii=False)[:400]}")
+            error_msg = json.dumps(data, ensure_ascii=False)[:400]
+            logger.warning(f"⚠️ {model_name} HTTP {response.status_code}: {error_msg}")
             return None
 
         candidates = data.get("candidates", [])
@@ -274,7 +277,6 @@ def generate_post():
     for model in TEXT_MODELS:
         text = call_gemini_text(model, prompt_text)
         if text:
-            # Жёстко обрезаем текст под лимит Telegram (1024 символа для подписи к фото)
             if len(text) > 1024:
                 logger.warning(f"⚠️ Текст от модели слишком длинный ({len(text)} симв.). Обрезаем до 1020 символов.")
                 text = text[:1020].rsplit(' ', 1)[0] + "…"
@@ -292,10 +294,8 @@ def generate_post():
 def generate_image(topic: str, rubric: str):
     """Получает качественное реальное фото с Unsplash по ключевым словам."""
     
-    # Создаем релевантные ключевые слова на основе темы и рубрики
     clean_topic = "".join(c if c.isalnum() or c.isspace() else "" for c in topic)
     
-    # Базовые keywords для бизнес/управленческой тематики в стиле уютного минимализма
     base_keywords = [
         "minimalist workspace",
         "wooden desk",
@@ -306,11 +306,9 @@ def generate_image(topic: str, rubric: str):
         "hygge office"
     ]
     
-    # Объединяем тему и базовые ключевые слова для лучшего поиска
     all_keywords = f"{clean_topic} {', '.join(base_keywords)}"
     query = urllib.parse.quote(all_keywords)
     
-    # URL API Unsplash (landscape дает горизонтальные фото 1200x630, идеальные для Telegram)
     url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape&content_filter=high&w=1200&h=630&client_id={UNSPLASH_ACCESS_KEY}"
     
     headers = {
@@ -326,11 +324,9 @@ def generate_image(topic: str, rubric: str):
             image_url = data.get("urls", {}).get("regular")
             download_url = data.get("urls", {}).get("full")
             
-            # Предпочитаем full качество, если оно доступно
             final_url = download_url if download_url else image_url
             
             if final_url:
-                # Скачиваем само изображение
                 img_response = requests.get(final_url, timeout=(5, 15))
                 if img_response.status_code == 200 and len(img_response.content) > 1000:
                     photographer = data.get('user', {}).get('name', 'Unknown')
@@ -362,7 +358,7 @@ def generate_image(topic: str, rubric: str):
 # TELEGRAM — ПУБЛИКАЦИЯ
 # =============================================================================
 def publish_to_telegram(text):
-    """Публикует обычное текстовое сообщение (fallback, если картинка не загрузилась)."""
+    """Публикует обычное текстовое сообщение (fallback)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHANNEL_ID,
@@ -420,7 +416,6 @@ def publish_photo_to_telegram(image_bytes: bytes, text: str):
 def main():
     logger.info("🚀 Запуск автопостинга...")
     
-    # Опционально: получаем список доступных моделей при запуске
     available = get_available_models()
     if available:
         logger.info(f"📋 Найдено {len(available)} доступных моделей Gemini")
