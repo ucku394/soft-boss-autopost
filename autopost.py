@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import random
-import base64
 import logging
 import urllib.parse
 from datetime import datetime
@@ -30,10 +29,11 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID', '').strip()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
+UNSPLASH_ACCESS_KEY = os.getenv('UNSPLASH_ACCESS_KEY', '').strip()
 
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY]):
-    logger.error("❌ Не все переменные заданы! Проверь .env файл:")
-    logger.error("   TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY")
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, UNSPLASH_ACCESS_KEY]):
+    logger.error("❌ Не все переменные заданы! Проверь .env файл или Secrets в GitHub:")
+    logger.error("   TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, UNSPLASH_ACCESS_KEY")
     sys.exit(1)
 
 # =============================================================================
@@ -44,10 +44,8 @@ MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4
 
 # АКТУАЛЬНЫЕ МОДЕЛИ ДЛЯ БЕСПЛАТНОГО ТАРИФА GEMINI (текст)
 TEXT_MODELS = [
-    "gemini-3.5-flash",       # Проверено — работает стабильно на free tier
-    "gemini-1.5-flash",       # Старая, но надёжная fallback
-    "gemini-3.6-flash",       # Новая, но может давать 503
-    "gemini-3.1-pro-preview", # Для сложного текста
+    "gemini-1.5-flash",       # Стабильная и быстрая
+    "gemini-1.5-pro",         # Для более качественного текста
 ]
 
 # =============================================================================
@@ -180,7 +178,7 @@ def get_prompt_for_today():
     day_data = THEMES[weekday]
     topic = pick_topic(weekday)
 
-    prompt = f"""Напиши пост для Telegram-канала @soft_boss про лидерство и управление командой для руководителей среднего звена.
+    prompt = f"""Напиши пост для Telegram-канала про лидерство и управление командой для руководителей среднего звена.
 
 Рубрика дня: {day_data['rubric']}
 Формат: {day_data['format_hint']}
@@ -195,12 +193,6 @@ def get_prompt_for_today():
 - ВЫДАВАЙ ТОЛЬКО ГОТОВЫЙ ТЕКСТ ПОСТА. Никаких размышлений, комментариев модели, счетчиков слов и пояснений.
 """
     return prompt, topic, day_data
-
-
-def get_image_prompt(topic: str, rubric: str) -> str:
-    """Короткий промпт для Pollinations.ai — чем короче, тем лучше."""
-    short_topic = topic.split('—')[0].split('(')[0].strip()[:60]
-    return f"Minimalist flat business illustration, {short_topic}, corporate blue and warm accent colors, clean composition, no text, no letters, no numbers, no words, flat 3D style, horizontal banner"
 
 
 # =============================================================================
@@ -260,7 +252,7 @@ def generate_post():
         if text:
             # Жёстко обрезаем текст под лимит Telegram (1024 символа для подписи к фото)
             if len(text) > 1024:
-                logger.warning(f"⚠️ Текст от модели слишком длинный ({len(text)} симв.). Обрезаем до 1020 символов для вместимости с фото.")
+                logger.warning(f"⚠️ Текст от модели слишком длинный ({len(text)} симв.). Обрезаем до 1020 символов.")
                 text = text[:1020].rsplit(' ', 1)[0] + "…"
 
             logger.info(f"✅ Текст готов: {len(text)} символов")
@@ -271,41 +263,74 @@ def generate_post():
 
 
 # =============================================================================
-# POLLINATIONS.AI — ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+# UNSPLASH API — ПОЛУЧЕНИЕ РЕАЛЬНЫХ ФОТО
 # =============================================================================
 def generate_image(topic: str, rubric: str):
-    """Генерирует картинку через Pollinations.ai. Возвращает байты или None."""
-    image_prompt = get_image_prompt(topic, rubric)
+    """Получает качественное реальное фото с Unsplash по ключевым словам."""
     
-    encoded_prompt = urllib.parse.quote(image_prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    # Создаем релевантные ключевые слова на основе темы и рубрики
+    clean_topic = "".join(c if c.isalnum() or c.isspace() else "" for c in topic)
     
-    params = {
-        "width": 1200,
-        "height": 630,
-        "seed": random.randint(1, 999999),
-        "nologo": "true",
-        "model": "flux",
+    # Базовые keywords для бизнес/управленческой тематики в стиле уютного минимализма
+    base_keywords = [
+        "minimalist workspace",
+        "wooden desk",
+        "office plants", 
+        "coffee cup",
+        "notebook pen",
+        "soft natural light",
+        "hygge office"
+    ]
+    
+    # Объединяем тему и базовые ключевые слова для лучшего поиска
+    all_keywords = f"{clean_topic} {', '.join(base_keywords)}"
+    query = urllib.parse.quote(all_keywords)
+    
+    # URL API Unsplash (landscape дает горизонтальные фото 1200x630, идеальные для Telegram)
+    url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape&content_filter=high&w=1200&h=630&client_id={UNSPLASH_ACCESS_KEY}"
+    
+    headers = {
+        "Accept-Version": "v1"
     }
     
     try:
-        logger.info(f"⏳ Генерируем картинку через Pollinations.ai...")
-        response = requests.get(url, params=params, timeout=(15, 120))
+        logger.info(f"⏳ Ищем фото на Unsplash: {clean_topic[:50]}...")
+        response = requests.get(url, headers=headers, timeout=(5, 15))
         
-        if response.status_code == 200 and len(response.content) > 1000:
-            content_type = response.headers.get('Content-Type', '')
-            if 'image' in content_type or response.content[:4] in [b'\xff\xd8\xff\xe0', b'\x89PNG', b'RIFF']:
-                logger.info(f"✅ Картинка сгенерирована: {len(response.content)} байт, тип: {content_type}")
-                return response.content
-            else:
-                logger.warning(f"⚠️ Ответ не является изображением. Content-Type: {content_type}")
-                return None
+        if response.status_code == 200:
+            data = response.json()
+            image_url = data.get("urls", {}).get("regular")
+            download_url = data.get("urls", {}).get("full")
+            
+            # Предпочитаем full качество, если оно доступно
+            final_url = download_url if download_url else image_url
+            
+            if final_url:
+                # Скачиваем само изображение
+                img_response = requests.get(final_url, timeout=(5, 15))
+                if img_response.status_code == 200 and len(img_response.content) > 1000:
+                    photographer = data.get('user', {}).get('name', 'Unknown')
+                    logger.info(f"✅ Фото найдено и загружено: {len(img_response.content)} байт (Автор: {photographer})")
+                    return img_response.content
+                else:
+                    logger.warning("⚠️ Пустой ответ при скачивании изображения")
+                    return None
+                    
+        elif response.status_code == 401:
+            logger.error("❌ Неверный UNSPLASH_ACCESS_KEY! Проверьте ключ в .env или Secrets GitHub.")
+            return None
+        elif response.status_code == 429:
+            logger.warning("⚠️ Превышен лимит запросов к Unsplash API (50 в час)")
+            return None
         else:
-            logger.warning(f"⚠️ Pollinations.ai HTTP {response.status_code}")
+            logger.warning(f"⚠️ Unsplash API error: HTTP {response.status_code}")
             return None
             
+    except requests.exceptions.Timeout:
+        logger.warning("⏱️ Превышено время ожидания Unsplash API")
+        return None
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка генерации картинки: {e}")
+        logger.warning(f"⚠️ Ошибка загрузки фото с Unsplash: {e}")
         return None
 
 
@@ -313,7 +338,7 @@ def generate_image(topic: str, rubric: str):
 # TELEGRAM — ПУБЛИКАЦИЯ
 # =============================================================================
 def publish_to_telegram(text):
-    """Публикует обычное текстовое сообщение (fallback, если картинка не сгенерировалась)."""
+    """Публикует обычное текстовое сообщение (fallback, если картинка не загрузилась)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHANNEL_ID,
@@ -342,7 +367,7 @@ def publish_photo_to_telegram(image_bytes: bytes, text: str):
     """Публикует фото вместе с текстом в качестве единой подписи (caption)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     
-    files = {"photo": ("cover.png", image_bytes, "image/png")}
+    files = {"photo": ("cover.jpg", image_bytes, "image/jpeg")}
     data = {
         "chat_id": TELEGRAM_CHANNEL_ID,
         "caption": text,
@@ -381,7 +406,7 @@ def main():
     if image_bytes:
         success = publish_photo_to_telegram(image_bytes, post_text)
     else:
-        logger.warning("⚠️ Картинка не сгенерирована — публикуем только текст")
+        logger.warning("⚠️ Картинка не получена — публикуем только текст (fallback)")
         success = publish_to_telegram(post_text)
 
     if not success:
