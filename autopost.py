@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import random
+import base64
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
@@ -161,7 +162,7 @@ def get_prompt_for_today():
     day_data = THEMES[weekday]
     topic = pick_topic(weekday)
 
-    return f"""Напиши пост для Telegram-канала @soft_boss про лидерство и управление командой для руководителей среднего звена.
+    prompt = f"""Напиши пост для Telegram-канала @soft_boss про лидерство и управление командой для руководителей среднего звена.
 
 Рубрика дня: {day_data['rubric']}
 Формат: {day_data['format_hint']}
@@ -175,13 +176,25 @@ def get_prompt_for_today():
 - HTML-теги: <b>жирный</b>, <i>курсив</i>
 - Только готовый текст, без пояснений
 """
+    return prompt, topic, day_data
 
 
-def call_gemini(model_name):
+def get_image_prompt(topic: str, rubric: str) -> str:
+    """Промпт для генерации обложки поста — деловая иллюстрация без текста на картинке."""
+    return f"""Создай минималистичную деловую иллюстрацию для обложки поста в Telegram-канале о менеджменте и лидерстве.
+
+Тематика поста: {topic} (рубрика: {rubric})
+
+Стиль: современный плоский флэт-дизайн или мягкий 3D-рендер, деловая палитра (синий, графитовый, тёплый акцентный цвет), сдержанная композиция, без фотореализма людей крупным планом.
+Важно: НИКАКОГО текста, надписей, букв или цифр на изображении.
+Формат: горизонтальный, подходит под обложку Telegram-поста."""
+
+
+def call_gemini(model_name, prompt_text):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
-        "contents": [{"parts": [{"text": get_prompt_for_today()}]}],
+        "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
             "temperature": 0.9,
             "maxOutputTokens": 4000
@@ -221,19 +234,68 @@ def call_gemini(model_name):
 
 
 def generate_post():
+    """Возвращает (текст_поста, тема, рубрика) или (None, None, None) при неудаче."""
+    prompt_text, topic, day_data = get_prompt_for_today()
     models = ["gemini-3.6-flash", "gemini-3.5-flash"]
 
     for model in models:
-        text = call_gemini(model)
+        text = call_gemini(model, prompt_text)
         if text:
             logger.info(f"✅ Используем {model}: {len(text)} символов")
-            return text
+            return text, topic, day_data["rubric"]
 
     logger.error("❌ Все модели вернули пустой/короткий текст")
+    return None, None, None
+
+
+def generate_image(topic: str, rubric: str):
+    """Генерирует картинку через Gemini image-модель. Возвращает байты PNG/JPEG или None."""
+    models = ["gemini-3-pro-image-preview", "gemini-2.5-flash-image"]
+    image_prompt = get_image_prompt(topic, rubric)
+
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": image_prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"]
+            }
+        }
+        try:
+            logger.info(f"⏳ Генерируем картинку через {model_name}...")
+            response = requests.post(url, json=payload, timeout=(10, 90))
+            data = response.json()
+
+            if response.status_code != 200:
+                logger.warning(f"⚠️ {model_name} (image) HTTP {response.status_code}: {data}")
+                continue
+
+            candidates = data.get("candidates", [])
+            if not candidates:
+                continue
+
+            parts = candidates[0].get("content", {}).get("parts", [])
+            for part in parts:
+                inline_data = part.get("inlineData") or part.get("inline_data")
+                if inline_data and inline_data.get("data"):
+                    image_bytes = base64.b64decode(inline_data["data"])
+                    logger.info(f"✅ Картинка сгенерирована через {model_name}: {len(image_bytes)} байт")
+                    return image_bytes
+
+            logger.warning(f"⚠️ {model_name}: в ответе нет inlineData")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка генерации картинки через {model_name}: {e}")
+
+    logger.error("❌ Не удалось сгенерировать картинку ни одной моделью")
     return None
 
 
+TELEGRAM_CAPTION_LIMIT = 1024  # ограничение Telegram на подпись к фото
+
+
 def publish_to_telegram(text):
+    """Публикует обычное текстовое сообщение (fallback, если картинка не сгенерировалась)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHANNEL_ID,
@@ -247,7 +309,7 @@ def publish_to_telegram(text):
         data = response.json()
 
         if response.status_code == 200 and data.get("ok"):
-            logger.info(f"✅ Пост опубликован! Message ID: {data['result']['message_id']}")
+            logger.info(f"✅ Пост опубликован (текстом)! Message ID: {data['result']['message_id']}")
             return True
         else:
             logger.error(f"❌ Ошибка Telegram: {data}")
@@ -258,14 +320,62 @@ def publish_to_telegram(text):
         return False
 
 
+def publish_photo_to_telegram(image_bytes: bytes, text: str):
+    """
+    Публикует фото с подписью. Если текст длиннее лимита caption (1024 симв.),
+    отправляет фото с обрезанной подписью, а затем полный текст отдельным сообщением.
+    """
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+
+    caption = text
+    send_full_text_separately = False
+    if len(text) > TELEGRAM_CAPTION_LIMIT:
+        caption = text[:TELEGRAM_CAPTION_LIMIT - 1] + "…"
+        send_full_text_separately = True
+
+    files = {"photo": ("cover.png", image_bytes, "image/png")}
+    data = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+
+    try:
+        response = requests.post(url, data=data, files=files, timeout=(10, 60))
+        resp_json = response.json()
+
+        if response.status_code == 200 and resp_json.get("ok"):
+            logger.info(f"✅ Пост с картинкой опубликован! Message ID: {resp_json['result']['message_id']}")
+        else:
+            logger.error(f"❌ Ошибка отправки фото в Telegram: {resp_json}")
+            return False
+
+        if send_full_text_separately:
+            logger.info("ℹ️ Текст длиннее лимита подписи — отправляем полный текст отдельным сообщением")
+            publish_to_telegram(text)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки фото: {e}")
+        return False
+
+
 def main():
     logger.info("🚀 Запуск...")
 
-    post_text = generate_post()
+    post_text, topic, rubric = generate_post()
     if not post_text:
         sys.exit(1)
 
-    success = publish_to_telegram(post_text)
+    image_bytes = generate_image(topic, rubric)
+
+    if image_bytes:
+        success = publish_photo_to_telegram(image_bytes, post_text)
+    else:
+        logger.warning("⚠️ Картинка не сгенерирована — публикуем только текст")
+        success = publish_to_telegram(post_text)
+
     if not success:
         sys.exit(1)
 
