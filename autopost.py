@@ -161,7 +161,13 @@ def pick_topic(weekday: int) -> str:
     key = str(weekday)
     recent = history.get(key, [])
 
-    candidates = [t for t in pool if t not in recent[-MEMORY_DEPTH:]]
+    # Никогда не исключаем весь пул целиком — всегда оставляем минимум 1 вариант,
+    # иначе при маленьких пулах (например, 4 темы при MEMORY_DEPTH=4) фильтр
+    # обнуляется и тема может повториться сразу на следующей неделе
+    max_memory = min(MEMORY_DEPTH, len(pool) - 1)
+    exclude = recent[-max_memory:] if max_memory > 0 else []
+
+    candidates = [t for t in pool if t not in exclude]
     if not candidates:
         candidates = pool
 
