@@ -5,9 +5,12 @@ import random
 import logging
 import urllib.parse
 import html
+import re
 from datetime import datetime
+
 from dotenv import load_dotenv
 import requests
+
 
 # =============================================================================
 # ЛОГИРОВАНИЕ
@@ -17,49 +20,92 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("autopost.log", encoding="utf-8"),
+        logging.FileHandler(
+            "autopost.log",
+            encoding="utf-8"
+        ),
         logging.StreamHandler(sys.stdout)
     ]
 )
 
 logger = logging.getLogger(__name__)
 
+
 # =============================================================================
-# ENV
+# ЗАГРУЗКА ENV
 # =============================================================================
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+).strip()
 
-if not all([
-    TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHANNEL_ID,
-    GEMINI_API_KEY,
-    UNSPLASH_ACCESS_KEY
-]):
+TELEGRAM_CHANNEL_ID = os.getenv(
+    "TELEGRAM_CHANNEL_ID",
+    ""
+).strip()
+
+GEMINI_API_KEY = os.getenv(
+    "GEMINI_API_KEY",
+    ""
+).strip()
+
+UNSPLASH_ACCESS_KEY = os.getenv(
+    "UNSPLASH_ACCESS_KEY",
+    ""
+).strip()
+
+
+# =============================================================================
+# ПРОВЕРКА ENV
+# =============================================================================
+
+required_variables = {
+    "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+    "TELEGRAM_CHANNEL_ID": TELEGRAM_CHANNEL_ID,
+    "GEMINI_API_KEY": GEMINI_API_KEY,
+    "UNSPLASH_ACCESS_KEY": UNSPLASH_ACCESS_KEY,
+}
+
+missing_variables = [
+    name
+    for name, value in required_variables.items()
+    if not value
+]
+
+if missing_variables:
+
     logger.error(
-        "❌ Не все переменные заданы! Проверь .env:"
+        "❌ Не заданы переменные:"
     )
+
+    for variable in missing_variables:
+        logger.error(
+            f"   {variable}"
+        )
+
     logger.error(
-        "TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, "
-        "GEMINI_API_KEY, UNSPLASH_ACCESS_KEY"
+        "Проверь файл .env"
     )
+
     sys.exit(1)
 
+
 # =============================================================================
-# ФАЙЛЫ
+# ПУТИ
 # =============================================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
 HISTORY_FILE = os.path.join(
     BASE_DIR,
     "content_history.json"
 )
+
 
 # =============================================================================
 # НАСТРОЙКИ
@@ -67,19 +113,29 @@ HISTORY_FILE = os.path.join(
 
 MEMORY_DEPTH = 20
 
+MAX_HISTORY_RECORDS = 100
+
+# Telegram caption для фотографии ограничен 1024 символами.
+# Оставляем запас.
+MAX_CAPTION_LENGTH = 1000
+
+# Минимальная оценка AI-редактора.
 MIN_QUALITY_SCORE = 7.0
 
-MAX_CAPTION_LENGTH = 1020
+
+# =============================================================================
+# МОДЕЛИ GEMINI
+# =============================================================================
 
 TEXT_MODELS = [
-    "gemini-3.8-flash",
     "gemini-3.6-flash",
     "gemini-flash-latest",
     "gemini-2.5-flash-lite",
 ]
 
+
 # =============================================================================
-# РУБРИКИ
+# ТЕМЫ ПО ДНЯМ НЕДЕЛИ
 # =============================================================================
 
 THEMES = {
@@ -102,7 +158,7 @@ THEMES = {
         "topics": [
             "Матрица приоритетов руководителя",
             "Как правильно делегировать задачу",
-            "Чек-лист эффективного one-to-one",
+            "Чек-лист эффективной встречи один на один",
             "Как давать негативную обратную связь",
             "Как контролировать задачу без микроменеджмента",
             "Как проводить сложный разговор с сотрудником"
@@ -171,135 +227,195 @@ THEMES = {
     }
 }
 
+
 # =============================================================================
-# AI SYSTEM PROMPT
+# ОЧИСТКА ТЕКСТА ОТ HTML
 # =============================================================================
 
-SYSTEM_PROMPT = """
-Ты — главный редактор современного Telegram-канала
-о лидерстве, управлении командами, эффективности руководителей,
-карьере и современных технологиях.
+def clean_ai_text(text: str) -> str:
+    """
+    Полностью очищает текст, который пришёл от AI.
 
-Аудитория:
-руководители среднего звена, директора, собственники бизнеса,
-руководители подразделений и специалисты, которые хотят стать сильнее
-как управленцы.
+    ВАЖНО:
+    Gemini может вернуть:
+        <br>
+        <br/>
+        <br />
+        <b>текст</b>
+        <i>текст</i>
 
-Твоя задача — создавать контент, который:
+    Мы не позволяем этим тегам попасть в Telegram.
+    """
 
-1. хочется открыть;
-2. хочется дочитать;
-3. хочется сохранить;
-4. хочется переслать коллеге;
-5. вызывает желание высказать своё мнение.
+    if text is None:
+        return ""
 
-СТИЛЬ:
+    text = str(text)
 
-- профессиональный;
-- уверенный;
-- современный;
-- интеллектуальный;
-- конкретный;
-- живой;
-- без инфоцыганства;
-- без банальной мотивации;
-- без канцелярита.
+    # ---------------------------------------------------------
+    # Убираем Markdown code fences
+    # ---------------------------------------------------------
 
-Пиши так, будто автор имеет реальный управленческий опыт.
+    text = re.sub(
+        r"```(?:html|markdown|text)?",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
 
-ЗАПРЕЩЕНО:
+    text = text.replace(
+        "```",
+        ""
+    )
 
-- "успешный успех";
-- "выход из зоны комфорта";
-- "никогда не сдавайтесь";
-- "поверьте в себя";
-- очевидные советы;
-- пустые мотивационные фразы;
-- выдуманные исследования;
-- выдуманные цифры;
-- выдуманные цитаты;
-- искусственный пафос.
+    # ---------------------------------------------------------
+    # Декодируем HTML entities
+    #
+    # &lt;br&gt; -> <br>
+    # &amp; -> &
+    # ---------------------------------------------------------
 
-Каждый пост должен содержать хотя бы одну конкретную мысль,
-которую руководитель может применить на практике.
+    text = html.unescape(text)
 
-НЕ РАСТЯГИВАЙ ТЕКСТ.
+    # ---------------------------------------------------------
+    # <br>, <br/>, <br /> -> перенос строки
+    # ---------------------------------------------------------
 
-Лучше 500 сильных символов, чем 1000 пустых.
+    text = re.sub(
+        r"<\s*br\s*/?\s*>",
+        "\n",
+        text,
+        flags=re.IGNORECASE
+    )
 
-ЗАГОЛОВОК должен вызывать интерес.
+    # ---------------------------------------------------------
+    # Удаляем HTML-теги
+    # ---------------------------------------------------------
 
-HOOK — первая мысль после заголовка.
-Он должен заставить читать дальше.
+    text = re.sub(
+        r"<[^>]*>",
+        "",
+        text
+    )
 
-ОСНОВНОЙ ТЕКСТ:
-объясняет проблему и даёт конкретный вывод.
+    # ---------------------------------------------------------
+    # Убираем лишние пробелы
+    # ---------------------------------------------------------
 
-CTA:
-естественный вопрос или призыв к действию.
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
 
-НЕ ПОВТОРЯЙ предыдущие публикации.
+    # ---------------------------------------------------------
+    # Убираем пробелы перед переносом
+    # ---------------------------------------------------------
 
-Если тема похожа на предыдущий пост,
-измени угол зрения.
+    text = re.sub(
+        r" +\n",
+        "\n",
+        text
+    )
 
-Используй HTML:
+    # ---------------------------------------------------------
+    # Максимум 2 переноса подряд
+    # ---------------------------------------------------------
 
-<b>жирный</b>
-<i>курсив</i>
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
 
-Не используй Markdown.
+    return text.strip()
 
-Всегда возвращай ТОЛЬКО JSON.
-"""
+
+# =============================================================================
+# БЕЗОПАСНЫЙ HTML ДЛЯ TELEGRAM
+# =============================================================================
+
+def telegram_escape(text: str) -> str:
+    """
+    Экранирует пользовательский текст перед добавлением
+    Telegram HTML-разметки.
+
+    Благодаря этому символы < > & не будут превращаться
+    в случайные HTML-теги.
+    """
+
+    if not text:
+        return ""
+
+    return html.escape(
+        str(text),
+        quote=False
+    )
+
 
 # =============================================================================
 # ИСТОРИЯ
 # =============================================================================
 
 def load_history():
-    if not os.path.exists(HISTORY_FILE):
+
+    if not os.path.exists(
+        HISTORY_FILE
+    ):
         return []
 
     try:
+
         with open(
             HISTORY_FILE,
             "r",
             encoding="utf-8"
-        ) as f:
-            data = json.load(f)
+        ) as file:
 
-        if isinstance(data, list):
+            data = json.load(file)
+
+        if isinstance(
+            data,
+            list
+        ):
             return data
 
         return []
 
     except Exception as e:
+
         logger.warning(
-            f"⚠️ Ошибка чтения истории: {e}"
+            f"⚠️ Не удалось прочитать историю: {e}"
         )
+
         return []
 
 
 def save_history(history):
 
     try:
+
+        history = history[
+            -MAX_HISTORY_RECORDS:
+        ]
+
         with open(
             HISTORY_FILE,
             "w",
             encoding="utf-8"
-        ) as f:
+        ) as file:
 
             json.dump(
-                history[-100:],
-                f,
+                history,
+                file,
                 ensure_ascii=False,
                 indent=2
             )
 
     except Exception as e:
+
         logger.warning(
-            f"⚠️ Ошибка сохранения истории: {e}"
+            f"⚠️ Не удалось сохранить историю: {e}"
         )
 
 
@@ -307,17 +423,28 @@ def save_history(history):
 # ВЫБОР ТЕМЫ
 # =============================================================================
 
-def pick_topic(weekday):
+def pick_topic(
+    weekday: int
+):
 
-    day_data = THEMES[weekday]
+    day_data = THEMES[
+        weekday
+    ]
 
-    pool = day_data["topics"]
+    pool = day_data[
+        "topics"
+    ]
 
     history = load_history()
 
     recent_topics = [
-        item.get("topic", "")
-        for item in history[-MEMORY_DEPTH:]
+        item.get(
+            "topic",
+            ""
+        )
+        for item in history[
+            -MEMORY_DEPTH:
+        ]
     ]
 
     candidates = [
@@ -329,13 +456,109 @@ def pick_topic(weekday):
     if not candidates:
         candidates = pool
 
-    topic = random.choice(candidates)
+    topic = random.choice(
+        candidates
+    )
 
     logger.info(
-        f"🎯 Выбрана тема: {topic}"
+        f"🎯 Тема: {topic}"
     )
 
     return topic
+
+
+# =============================================================================
+# СИСТЕМНЫЙ ПРОМПТ
+# =============================================================================
+
+SYSTEM_PROMPT = """
+Ты — главный редактор современного Telegram-канала
+о лидерстве, управлении командами, эффективности руководителей,
+карьере и современных технологиях.
+
+АУДИТОРИЯ:
+
+Руководители среднего звена, директора, собственники бизнеса,
+руководители подразделений и специалисты, которые хотят стать
+сильнее как управленцы.
+
+ГЛАВНАЯ ЦЕЛЬ:
+
+Создавать публикации, которые:
+
+1. хочется открыть;
+2. хочется дочитать;
+3. хочется сохранить;
+4. хочется переслать коллеге;
+5. хочется обсудить.
+
+СТИЛЬ:
+
+- профессиональный;
+- уверенный;
+- современный;
+- интеллектуальный;
+- конкретный;
+- живой.
+
+Пиши так, будто автор имеет реальный управленческий опыт.
+
+НЕ ИСПОЛЬЗУЙ:
+
+- инфоцыганство;
+- "успешный успех";
+- "выход из зоны комфорта";
+- "никогда не сдавайтесь";
+- "поверьте в себя";
+- пустую мотивацию;
+- банальные советы;
+- искусственный пафос;
+- канцелярит.
+
+НЕ ВЫДУМЫВАЙ:
+
+- факты;
+- статистику;
+- исследования;
+- цифры;
+- цитаты;
+- названия компаний;
+- события.
+
+Если факт неизвестен — не утверждай его как факт.
+
+КАЖДЫЙ ПОСТ ДОЛЖЕН ИМЕТЬ:
+
+1. Сильный заголовок.
+2. Hook — первая мысль, заставляющая читать дальше.
+3. Основную полезную мысль.
+4. Практический вывод.
+5. Естественный вопрос аудитории.
+
+ВАЖНО:
+
+НЕ ИСПОЛЬЗУЙ HTML.
+
+НЕ ИСПОЛЬЗУЙ:
+
+<br>
+<br/>
+<br />
+<b>
+</b>
+<i>
+</i>
+<u>
+</u>
+<s>
+</s>
+
+НЕ ИСПОЛЬЗУЙ Markdown.
+
+Форматирование Telegram будет добавлено программой автоматически.
+
+Возвращай обычный чистый текст внутри JSON.
+"""
 
 
 # =============================================================================
@@ -346,22 +569,39 @@ def build_generation_prompt():
 
     weekday = datetime.now().weekday()
 
-    day_data = THEMES[weekday]
+    day_data = THEMES[
+        weekday
+    ]
 
-    topic = pick_topic(weekday)
+    topic = pick_topic(
+        weekday
+    )
 
     history = load_history()
 
     recent_titles = [
-        item.get("title", "")
-        for item in history[-10:]
+        item.get(
+            "title",
+            ""
+        )
+        for item in history[
+            -10:
+        ]
         if item.get("title")
     ]
 
-    history_text = "\n".join(
-        f"- {title}"
-        for title in recent_titles
-    )
+    if recent_titles:
+
+        history_text = "\n".join(
+            f"- {title}"
+            for title in recent_titles
+        )
+
+    else:
+
+        history_text = (
+            "Пока публикаций нет."
+        )
 
     prompt = f"""
 Сегодня:
@@ -376,46 +616,156 @@ def build_generation_prompt():
 Тема:
 {topic}
 
-Последние заголовки канала:
+ПОСЛЕДНИЕ ЗАГОЛОВКИ КАНАЛА:
 
 {history_text}
 
 Создай новую публикацию.
 
-Она должна отличаться от предыдущих публикаций
+Она должна отличаться от предыдущих
 не только формулировкой, но и углом зрения.
 
-Верни JSON строго следующего формата:
+СТРУКТУРА JSON:
 
 {{
-  "title": "короткий сильный заголовок",
-  "hook": "цепляющая первая мысль",
-  "body": "основной текст",
-  "cta": "вопрос аудитории",
-  "hashtags": ["#управление", "#лидерство"],
-  "image_query": "короткий английский запрос для Unsplash",
-  "rubric": "{day_data["rubric"]}"
+    "title": "сильный короткий заголовок",
+    "hook": "цепляющая первая мысль",
+    "body": "основной текст",
+    "cta": "естественный вопрос аудитории",
+    "hashtags": [
+        "#управление",
+        "#лидерство"
+    ],
+    "image_query": "short English search query",
+    "rubric": "{day_data["rubric"]}"
 }}
 
-Ограничения:
+ТРЕБОВАНИЯ:
 
-title — желательно до 90 символов.
+title:
+до 90 символов.
 
-body + hook + cta + hashtags должны вместе
-умещаться примерно в 900 символов.
+hook:
+1–2 предложения.
 
-Не используй выдуманные факты.
+body:
+содержательный текст.
 
-image_query пиши на английском языке.
+Общий текст должен быть компактным.
+Не растягивай мысль ради количества символов.
 
-Не добавляй никаких комментариев вне JSON.
+cta:
+один естественный вопрос.
+
+hashtags:
+2–3 релевантных хэштега.
+
+image_query:
+короткий запрос на английском языке
+для поиска фотографии на Unsplash.
+
+НЕ ИСПОЛЬЗУЙ HTML.
+
+НЕ ИСПОЛЬЗУЙ <br>, <b>, <i> и другие HTML-теги.
+
+НЕ ДОБАВЛЯЙ НИКАКИХ ПОЯСНЕНИЙ ВНЕ JSON.
 """
 
-    return prompt, topic, day_data["rubric"]
+    return (
+        prompt,
+        topic,
+        day_data["rubric"]
+    )
 
 
 # =============================================================================
-# GEMINI
+# ИЗВЛЕЧЕНИЕ JSON
+# =============================================================================
+
+def extract_json(
+    raw_text: str
+):
+
+    if not raw_text:
+        return None
+
+    text = raw_text.strip()
+
+    # ---------------------------------------------------------
+    # Убираем markdown code block
+    # ---------------------------------------------------------
+
+    text = re.sub(
+        r"^```json\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"^```\s*",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"\s*```$",
+        "",
+        text
+    )
+
+    text = text.strip()
+
+    # ---------------------------------------------------------
+    # Первая попытка
+    # ---------------------------------------------------------
+
+    try:
+
+        return json.loads(
+            text
+        )
+
+    except json.JSONDecodeError:
+        pass
+
+    # ---------------------------------------------------------
+    # Если модель добавила текст до/после JSON,
+    # ищем первый объект
+    # ---------------------------------------------------------
+
+    start = text.find(
+        "{"
+    )
+
+    end = text.rfind(
+        "}"
+    )
+
+    if start != -1 and end != -1 and end > start:
+
+        candidate = text[
+            start:end + 1
+        ]
+
+        try:
+
+            return json.loads(
+                candidate
+            )
+
+        except json.JSONDecodeError:
+            pass
+
+    logger.warning(
+        "⚠️ Не удалось распознать JSON от Gemini"
+    )
+
+    return None
+
+
+# =============================================================================
+# GEMINI API
 # =============================================================================
 
 def call_gemini(
@@ -429,34 +779,50 @@ def call_gemini(
         f"?key={GEMINI_API_KEY}"
     )
 
+    # ---------------------------------------------------------
+    # Структура JSON
+    # ---------------------------------------------------------
+
     schema = {
+
         "type": "OBJECT",
+
         "properties": {
+
             "title": {
                 "type": "STRING"
             },
+
             "hook": {
                 "type": "STRING"
             },
+
             "body": {
                 "type": "STRING"
             },
+
             "cta": {
                 "type": "STRING"
             },
+
             "hashtags": {
+
                 "type": "ARRAY",
+
                 "items": {
                     "type": "STRING"
                 }
             },
+
             "image_query": {
                 "type": "STRING"
             },
+
             "rubric": {
                 "type": "STRING"
             }
         },
+
         "required": [
             "title",
             "hook",
@@ -471,12 +837,15 @@ def call_gemini(
     payload = {
 
         "contents": [
+
             {
                 "parts": [
+
                     {
-                        "text": SYSTEM_PROMPT
-                        + "\n\n"
-                        + prompt
+                        "text":
+                            SYSTEM_PROMPT
+                            + "\n\n"
+                            + prompt
                     }
                 ]
             }
@@ -488,16 +857,18 @@ def call_gemini(
 
             "maxOutputTokens": 3000,
 
-            "responseMimeType": "application/json",
+            "responseMimeType":
+                "application/json",
 
-            "responseSchema": schema
+            "responseSchema":
+                schema
         }
     }
 
     try:
 
         logger.info(
-            f"🤖 Запрашиваем Gemini: {model_name}"
+            f"🤖 Gemini: {model_name}"
         )
 
         response = requests.post(
@@ -506,23 +877,41 @@ def call_gemini(
             timeout=(10, 90)
         )
 
-        data = response.json()
+        try:
+
+            data = response.json()
+
+        except Exception:
+
+            logger.warning(
+                "⚠️ Gemini вернул не JSON HTTP-ответ"
+            )
+
+            return None
+
+        # -----------------------------------------------------
+        # Ошибка API
+        # -----------------------------------------------------
 
         if response.status_code != 200:
 
             logger.warning(
-                f"⚠️ Gemini {model_name}: "
-                f"HTTP {response.status_code}"
+                f"⚠️ Gemini HTTP "
+                f"{response.status_code}"
             )
 
             logger.warning(
                 json.dumps(
                     data,
                     ensure_ascii=False
-                )[:1000]
+                )[:1500]
             )
 
             return None
+
+        # -----------------------------------------------------
+        # candidates
+        # -----------------------------------------------------
 
         candidates = data.get(
             "candidates",
@@ -530,51 +919,146 @@ def call_gemini(
         )
 
         if not candidates:
+
             logger.warning(
-                "⚠️ Gemini вернул пустой candidates"
+                "⚠️ Gemini: candidates пуст"
             )
+
             return None
 
-        parts = (
-            candidates[0]
-            .get("content", {})
-            .get("parts", [])
+        candidate = candidates[
+            0
+        ]
+
+        content = candidate.get(
+            "content",
+            {}
+        )
+
+        parts = content.get(
+            "parts",
+            []
         )
 
         if not parts:
+
+            logger.warning(
+                "⚠️ Gemini: parts пуст"
+            )
+
             return None
 
-        raw_text = parts[0].get(
+        raw_text = parts[
+            0
+        ].get(
             "text",
             ""
         ).strip()
 
         if not raw_text:
-            return None
-
-        logger.info(
-            f"📦 Получен JSON: "
-            f"{len(raw_text)} символов"
-        )
-
-        try:
-
-            result = json.loads(raw_text)
-
-        except json.JSONDecodeError:
 
             logger.warning(
-                "⚠️ Gemini вернул некорректный JSON"
+                "⚠️ Gemini вернул пустой текст"
             )
 
             return None
+
+        logger.info(
+            f"📦 Получено: "
+            f"{len(raw_text)} символов"
+        )
+
+        # -----------------------------------------------------
+        # JSON
+        # -----------------------------------------------------
+
+        result = extract_json(
+            raw_text
+        )
+
+        if not result:
+
+            return None
+
+        # -----------------------------------------------------
+        # ФИНАЛЬНАЯ ОЧИСТКА AI-ТЕКСТА
+        # -----------------------------------------------------
+
+        for field in [
+            "title",
+            "hook",
+            "body",
+            "cta"
+        ]:
+
+            if field in result:
+
+                result[field] = clean_ai_text(
+                    result[field]
+                )
+
+        # -----------------------------------------------------
+        # Очистка hashtags
+        # -----------------------------------------------------
+
+        hashtags = result.get(
+            "hashtags",
+            []
+        )
+
+        if not isinstance(
+            hashtags,
+            list
+        ):
+            hashtags = []
+
+        clean_hashtags = []
+
+        for hashtag in hashtags[:3]:
+
+            hashtag = clean_ai_text(
+                str(hashtag)
+            )
+
+            hashtag = hashtag.replace(
+                " ",
+                ""
+            )
+
+            if hashtag:
+
+                if not hashtag.startswith(
+                    "#"
+                ):
+                    hashtag = "#" + hashtag
+
+                clean_hashtags.append(
+                    hashtag
+                )
+
+        result[
+            "hashtags"
+        ] = clean_hashtags
+
+        # -----------------------------------------------------
+        # Очистка image_query
+        # -----------------------------------------------------
+
+        result[
+            "image_query"
+        ] = clean_ai_text(
+            result.get(
+                "image_query",
+                ""
+            )
+        )
 
         return result
 
     except requests.exceptions.Timeout:
 
         logger.warning(
-            f"⏱️ Timeout Gemini {model_name}"
+            f"⏱️ Timeout Gemini: {model_name}"
         )
 
         return None
@@ -592,65 +1076,81 @@ def call_gemini(
 # AI РЕДАКТОР
 # =============================================================================
 
-def edit_post(post):
+def edit_post(
+    post
+):
 
     prompt = f"""
-Ты получил черновик Telegram-публикации.
+Ты — строгий главный редактор Telegram-канала.
 
-Проверь его как строгий главный редактор.
+Проверь и улучши следующий пост.
 
-ЧЕРНОВИК:
-
-Заголовок:
+ЗАГОЛОВОК:
 {post.get("title", "")}
 
-Hook:
+HOOK:
 {post.get("hook", "")}
 
-Текст:
+ТЕКСТ:
 {post.get("body", "")}
 
 CTA:
 {post.get("cta", "")}
 
-Хэштеги:
+ХЭШТЕГИ:
 {post.get("hashtags", [])}
 
-Проверь:
+Оцени:
 
-1. Есть ли сильный hook?
-2. Нет ли банальностей?
-3. Есть ли конкретная польза?
-4. Не повторяет ли пост очевидные советы?
-5. Хороший ли заголовок?
-6. Вызывает ли CTA желание ответить?
-7. Нет ли выдуманных фактов?
-8. Не слишком ли много текста?
+1. Силу заголовка.
+2. Силу первой фразы.
+3. Конкретность.
+4. Пользу для руководителя.
+5. Оригинальность.
+6. Читабельность.
+7. Вероятность сохранения/пересылки.
+8. Качество вопроса аудитории.
 
 Оценка от 1 до 10.
+
+ВАЖНО:
+
+Не просто оценивай.
+
+Если что-то слабое —
+исправь.
+
+НЕ ИСПОЛЬЗУЙ HTML.
+
+НЕ ИСПОЛЬЗУЙ:
+
+<br>
+<br/>
+<b>
+<i>
 
 Верни JSON:
 
 {{
-  "quality_score": 8.5,
-  "title": "...",
-  "hook": "...",
-  "body": "...",
-  "cta": "...",
-  "hashtags": ["#управление", "#лидерство"],
-  "image_query": "...",
-  "editor_comment": "короткий комментарий"
+    "quality_score": 8.5,
+    "title": "...",
+    "hook": "...",
+    "body": "...",
+    "cta": "...",
+    "hashtags": [
+        "#управление",
+        "#лидерство"
+    ],
+    "image_query": "...",
+    "editor_comment": "..."
 }}
-
-Если текст можно улучшить —
-ИСПРАВЬ его.
-
-Не просто оценивай.
 
 Верни только JSON.
 """
 
-    result = None
+    # ---------------------------------------------------------
+    # Используем модели по очереди
+    # ---------------------------------------------------------
 
     for model in TEXT_MODELS:
 
@@ -660,70 +1160,137 @@ CTA:
         )
 
         if result:
-            break
 
-    if not result:
-        logger.warning(
-            "⚠️ AI Editor не смог обработать пост"
-        )
-        return post
+            try:
 
-    try:
+                score = float(
+                    result.get(
+                        "quality_score",
+                        0
+                    )
+                )
 
-        score = float(
-            result.get(
-                "quality_score",
-                0
+            except Exception:
+
+                score = 0
+
+            logger.info(
+                f"📝 Оценка AI-редактора: "
+                f"{score}/10"
             )
-        )
 
-    except Exception:
+            if score < MIN_QUALITY_SCORE:
 
-        score = 0
+                logger.warning(
+                    f"⚠️ Качество ниже "
+                    f"порога {MIN_QUALITY_SCORE}"
+                )
 
-    logger.info(
-        f"📝 Оценка редактора: {score}/10"
+            return result
+
+    logger.warning(
+        "⚠️ AI Editor не смог обработать пост"
     )
 
-    if score < MIN_QUALITY_SCORE:
+    return post
 
-        logger.warning(
-            f"⚠️ Пост получил только {score}/10"
+
+# =============================================================================
+# ПРОВЕРКА ПОСТА
+# =============================================================================
+
+def validate_post(
+    post
+):
+
+    required_fields = [
+        "title",
+        "hook",
+        "body",
+        "cta"
+    ]
+
+    for field in required_fields:
+
+        value = post.get(
+            field,
+            ""
         )
 
-        # Не блокируем публикацию полностью.
-        # Иначе канал может остаться без поста.
-        # Позже сделаем автоматическую регенерацию.
-        result["quality_warning"] = True
+        if not str(value).strip():
 
-    return result
+            logger.warning(
+                f"⚠️ Отсутствует поле: {field}"
+            )
+
+            return False
+
+    return True
 
 
 # =============================================================================
-# ФОРМИРОВАНИЕ TELEGRAM ТЕКСТА
+# ФОРМИРОВАНИЕ TELEGRAM-ТЕКСТА
 # =============================================================================
 
-def build_telegram_text(post):
+def build_telegram_text(
+    post
+):
 
-    title = post.get(
-        "title",
-        ""
-    ).strip()
+    # ---------------------------------------------------------
+    # СНАЧАЛА ОЧИЩАЕМ
+    # ---------------------------------------------------------
 
-    hook = post.get(
-        "hook",
-        ""
-    ).strip()
+    title = clean_ai_text(
+        post.get(
+            "title",
+            ""
+        )
+    )
 
-    body = post.get(
-        "body",
-        ""
-    ).strip()
+    hook = clean_ai_text(
+        post.get(
+            "hook",
+            ""
+        )
+    )
 
-    cta = post.get(
-        "cta",
-        ""
-    ).strip()
+    body = clean_ai_text(
+        post.get(
+            "body",
+            ""
+        )
+    )
+
+    cta = clean_ai_text(
+        post.get(
+            "cta",
+            ""
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Экранируем
+    # ---------------------------------------------------------
+
+    title = telegram_escape(
+        title
+    )
+
+    hook = telegram_escape(
+        hook
+    )
+
+    body = telegram_escape(
+        body
+    )
+
+    cta = telegram_escape(
+        cta
+    )
+
+    # ---------------------------------------------------------
+    # Хэштеги
+    # ---------------------------------------------------------
 
     hashtags = post.get(
         "hashtags",
@@ -736,55 +1303,113 @@ def build_telegram_text(post):
     ):
         hashtags = []
 
+    clean_hashtags = []
+
+    for hashtag in hashtags[:3]:
+
+        hashtag = clean_ai_text(
+            str(hashtag)
+        )
+
+        hashtag = hashtag.replace(
+            " ",
+            ""
+        )
+
+        if hashtag:
+
+            if not hashtag.startswith(
+                "#"
+            ):
+                hashtag = "#" + hashtag
+
+            clean_hashtags.append(
+                hashtag
+            )
+
     hashtags_text = " ".join(
-        str(x).strip()
-        for x in hashtags[:3]
-        if str(x).strip()
+        clean_hashtags
     )
+
+    hashtags_text = telegram_escape(
+        hashtags_text
+    )
+
+    # ---------------------------------------------------------
+    # СОБИРАЕМ ПОСТ
+    # ---------------------------------------------------------
 
     parts = []
 
     if title:
+
         parts.append(
-            f"<b>{html.escape(title)}</b>"
+            f"<b>{title}</b>"
         )
 
     if hook:
+
         parts.append(
-            html.escape(hook)
+            hook
         )
 
     if body:
+
         parts.append(
-            html.escape(body)
+            body
         )
 
     if cta:
+
         parts.append(
-            f"<i>{html.escape(cta)}</i>"
+            f"<i>{cta}</i>"
         )
 
     if hashtags_text:
+
         parts.append(
-            html.escape(hashtags_text)
+            hashtags_text
         )
 
-    text = "\n\n".join(parts)
+    text = "\n\n".join(
+        parts
+    )
+
+    # ---------------------------------------------------------
+    # ФИНАЛЬНАЯ ЗАЩИТА
+    # ---------------------------------------------------------
+
+    # Если вдруг AI каким-то образом протащил
+    # <br> или другие теги — удаляем.
+
+    text = re.sub(
+        r"<\s*br\s*/?\s*>",
+        "\n",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # ---------------------------------------------------------
+    # Ограничение длины
+    # ---------------------------------------------------------
 
     if len(text) > MAX_CAPTION_LENGTH:
 
         logger.warning(
-            f"⚠️ Пост слишком длинный: "
+            f"⚠️ Пост длинный: "
             f"{len(text)} символов"
         )
 
         text = (
             text[:MAX_CAPTION_LENGTH]
-            .rsplit(" ", 1)[0]
+            .rsplit(
+                " ",
+                1
+            )[0]
             + "…"
         )
 
-    return text
+    return text.strip()
 
 
 # =============================================================================
@@ -796,7 +1421,10 @@ def generate_image(
 ):
 
     if not image_query:
-        image_query = "modern business leadership"
+
+        image_query = (
+            "modern business leadership"
+        )
 
     query = urllib.parse.quote(
         image_query
@@ -814,7 +1442,7 @@ def generate_image(
     try:
 
         logger.info(
-            f"🖼️ Ищем изображение: "
+            f"🖼️ Unsplash запрос: "
             f"{image_query}"
         )
 
@@ -825,6 +1453,22 @@ def generate_image(
             },
             timeout=(5, 20)
         )
+
+        if response.status_code == 401:
+
+            logger.error(
+                "❌ Неверный UNSPLASH_ACCESS_KEY"
+            )
+
+            return None
+
+        if response.status_code == 429:
+
+            logger.warning(
+                "⚠️ Лимит Unsplash превышен"
+            )
+
+            return None
 
         if response.status_code != 200:
 
@@ -844,6 +1488,11 @@ def generate_image(
         )
 
         if not image_url:
+
+            logger.warning(
+                "⚠️ Unsplash не вернул URL изображения"
+            )
+
             return None
 
         image_response = requests.get(
@@ -869,6 +1518,18 @@ def generate_image(
 
             return image_response.content
 
+        logger.warning(
+            "⚠️ Не удалось скачать изображение"
+        )
+
+        return None
+
+    except requests.exceptions.Timeout:
+
+        logger.warning(
+            "⏱️ Timeout Unsplash"
+        )
+
         return None
 
     except Exception as e:
@@ -881,7 +1542,7 @@ def generate_image(
 
 
 # =============================================================================
-# TELEGRAM
+# TELEGRAM — ФОТО
 # =============================================================================
 
 def publish_photo(
@@ -895,6 +1556,7 @@ def publish_photo(
     )
 
     files = {
+
         "photo": (
             "cover.jpg",
             image_bytes,
@@ -903,13 +1565,22 @@ def publish_photo(
     }
 
     data = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
-        "caption": text,
-        "parse_mode": "HTML",
-        "show_caption_above_media": False
+
+        "chat_id":
+            TELEGRAM_CHANNEL_ID,
+
+        "caption":
+            text,
+
+        "parse_mode":
+            "HTML"
     }
 
     try:
+
+        logger.info(
+            "📤 Отправляем фото в Telegram..."
+        )
 
         response = requests.post(
             url,
@@ -918,7 +1589,18 @@ def publish_photo(
             timeout=(10, 60)
         )
 
-        result = response.json()
+        try:
+
+            result = response.json()
+
+        except Exception:
+
+            logger.error(
+                "❌ Telegram вернул "
+                "некорректный ответ"
+            )
+
+            return None
 
         if (
             response.status_code == 200
@@ -926,18 +1608,29 @@ def publish_photo(
         ):
 
             message_id = (
-                result["result"]["message_id"]
+                result[
+                    "result"
+                ][
+                    "message_id"
+                ]
             )
 
             logger.info(
-                f"✅ Пост опубликован. "
+                f"✅ Фото-пост опубликован. "
                 f"Message ID: {message_id}"
             )
 
             return message_id
 
         logger.error(
-            f"❌ Telegram error: {result}"
+            "❌ Ошибка Telegram:"
+        )
+
+        logger.error(
+            json.dumps(
+                result,
+                ensure_ascii=False
+            )
         )
 
         return None
@@ -945,13 +1638,19 @@ def publish_photo(
     except Exception as e:
 
         logger.error(
-            f"❌ Ошибка Telegram: {e}"
+            f"❌ Ошибка отправки фото: {e}"
         )
 
         return None
 
 
-def publish_text(text):
+# =============================================================================
+# TELEGRAM — ТЕКСТ
+# =============================================================================
+
+def publish_text(
+    text
+):
 
     url = (
         f"https://api.telegram.org/"
@@ -959,13 +1658,25 @@ def publish_text(text):
     )
 
     payload = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
+
+        "chat_id":
+            TELEGRAM_CHANNEL_ID,
+
+        "text":
+            text,
+
+        "parse_mode":
+            "HTML",
+
+        "disable_web_page_preview":
+            False
     }
 
     try:
+
+        logger.info(
+            "📤 Отправляем текст в Telegram..."
+        )
 
         response = requests.post(
             url,
@@ -981,7 +1692,11 @@ def publish_text(text):
         ):
 
             message_id = (
-                result["result"]["message_id"]
+                result[
+                    "result"
+                ][
+                    "message_id"
+                ]
             )
 
             logger.info(
@@ -1020,36 +1735,49 @@ def save_post_history(
 
     record = {
 
-        "date": datetime.now().isoformat(),
+        "date":
+            datetime.now().isoformat(),
 
-        "topic": topic,
+        "topic":
+            topic,
 
-        "title": post.get(
-            "title",
-            ""
-        ),
+        "title":
+            clean_ai_text(
+                post.get(
+                    "title",
+                    ""
+                )
+            ),
 
-        "rubric": post.get(
-            "rubric",
-            ""
-        ),
+        "rubric":
+            post.get(
+                "rubric",
+                ""
+            ),
 
-        "quality_score": post.get(
-            "quality_score",
-            None
-        ),
+        "quality_score":
+            post.get(
+                "quality_score",
+                None
+            ),
 
-        "image_query": post.get(
-            "image_query",
-            ""
-        ),
+        "image_query":
+            post.get(
+                "image_query",
+                ""
+            ),
 
-        "message_id": message_id
+        "message_id":
+            message_id
     }
 
-    history.append(record)
+    history.append(
+        record
+    )
 
-    save_history(history)
+    save_history(
+        history
+    )
 
     logger.info(
         "💾 История публикации сохранена"
@@ -1068,6 +1796,10 @@ def generate_post():
 
     generated = None
 
+    # ---------------------------------------------------------
+    # Генерируем
+    # ---------------------------------------------------------
+
     for model in TEXT_MODELS:
 
         generated = call_gemini(
@@ -1076,33 +1808,82 @@ def generate_post():
         )
 
         if generated:
+
             logger.info(
-                f"✅ Черновик создан через {model}"
+                f"✅ Черновик создан через "
+                f"{model}"
             )
+
             break
 
     if not generated:
 
         logger.error(
-            "❌ Не удалось создать пост"
+            "❌ Все модели Gemini "
+            "не смогли создать пост"
         )
 
         return None, None
 
-    # AI Editor
+    # ---------------------------------------------------------
+    # Проверяем
+    # ---------------------------------------------------------
+
+    if not validate_post(
+        generated
+    ):
+
+        logger.error(
+            "❌ Gemini создал неполный пост"
+        )
+
+        return None, None
+
+    # ---------------------------------------------------------
+    # AI редактор
+    # ---------------------------------------------------------
+
     edited = edit_post(
         generated
     )
 
-    edited["rubric"] = rubric
+    if not edited:
 
-    text = build_telegram_text(
+        edited = generated
+
+    edited[
+        "rubric"
+    ] = rubric
+
+    # ---------------------------------------------------------
+    # Ещё раз очищаем
+    # ---------------------------------------------------------
+
+    for field in [
+        "title",
+        "hook",
+        "body",
+        "cta"
+    ]:
+
+        edited[field] = clean_ai_text(
+            edited.get(
+                field,
+                ""
+            )
+        )
+
+    # ---------------------------------------------------------
+    # Формируем Telegram
+    # ---------------------------------------------------------
+
+    telegram_text = build_telegram_text(
         edited
     )
 
     logger.info(
-        f"📏 Размер Telegram-поста: "
-        f"{len(text)} символов"
+        f"📏 Размер поста: "
+        f"{len(telegram_text)} символов"
     )
 
     return edited, topic
@@ -1115,26 +1896,38 @@ def generate_post():
 def main():
 
     logger.info(
-        "========================================"
+        ""
     )
 
     logger.info(
-        "🚀 ЗАПУСК TELEGRAM AI EDITOR V2"
+        "=========================================="
     )
 
     logger.info(
-        "========================================"
+        "🚀 TELEGRAM AI EDITOR V2"
     )
+
+    logger.info(
+        "=========================================="
+    )
+
+    # ---------------------------------------------------------
+    # Генерация
+    # ---------------------------------------------------------
 
     post, topic = generate_post()
 
     if not post:
 
         logger.error(
-            "❌ Генерация завершилась ошибкой"
+            "❌ Пост не создан"
         )
 
         sys.exit(1)
+
+    # ---------------------------------------------------------
+    # Информация
+    # ---------------------------------------------------------
 
     logger.info(
         f"📰 Заголовок: "
@@ -1142,22 +1935,37 @@ def main():
     )
 
     logger.info(
-        f"🎯 Качество: "
+        f"📊 Качество: "
         f"{post.get('quality_score', 'N/A')}/10"
     )
+
+    logger.info(
+        f"🖼️ Image query: "
+        f"{post.get('image_query', '')}"
+    )
+
+    # ---------------------------------------------------------
+    # Telegram текст
+    # ---------------------------------------------------------
 
     telegram_text = build_telegram_text(
         post
     )
 
-    image_query = post.get(
-        "image_query",
-        ""
-    )
+    # ---------------------------------------------------------
+    # Получаем фото
+    # ---------------------------------------------------------
 
     image_bytes = generate_image(
-        image_query
+        post.get(
+            "image_query",
+            ""
+        )
     )
+
+    # ---------------------------------------------------------
+    # Публикация
+    # ---------------------------------------------------------
 
     message_id = None
 
@@ -1171,20 +1979,32 @@ def main():
     else:
 
         logger.warning(
-            "⚠️ Изображение не получено."
+            "⚠️ Фото не получено."
+        )
+
+        logger.warning(
+            "Публикуем текстом."
         )
 
         message_id = publish_text(
             telegram_text
         )
 
+    # ---------------------------------------------------------
+    # Проверяем публикацию
+    # ---------------------------------------------------------
+
     if not message_id:
 
         logger.error(
-            "❌ Публикация не удалась"
+            "❌ Пост не опубликован"
         )
 
         sys.exit(1)
+
+    # ---------------------------------------------------------
+    # История
+    # ---------------------------------------------------------
 
     save_post_history(
         post,
@@ -1192,18 +2012,26 @@ def main():
         message_id
     )
 
+    # ---------------------------------------------------------
+    # ГОТОВО
+    # ---------------------------------------------------------
+
     logger.info(
-        "========================================"
+        "=========================================="
     )
 
     logger.info(
-        "🎉 V2 УСПЕШНО ЗАВЕРШИЛА РАБОТУ"
+        "🎉 ПОСТ УСПЕШНО ОПУБЛИКОВАН"
     )
 
     logger.info(
-        "========================================"
+        "=========================================="
     )
 
+
+# =============================================================================
+# START
+# =============================================================================
 
 if __name__ == "__main__":
     main()
