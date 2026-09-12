@@ -4,394 +4,960 @@ import json
 import random
 import logging
 import urllib.parse
+import html
 from datetime import datetime
 from dotenv import load_dotenv
 import requests
 
 # =============================================================================
-# НАСТРОЙКА ЛОГИРОВАНИЯ
+# ЛОГИРОВАНИЕ
 # =============================================================================
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler('autopost.log', encoding='utf-8'),
+        logging.FileHandler("autopost.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# ENV
 # =============================================================================
+
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
-TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID', '').strip()
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
-UNSPLASH_ACCESS_KEY = os.getenv('UNSPLASH_ACCESS_KEY', '').strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
 
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, UNSPLASH_ACCESS_KEY]):
-    logger.error("❌ Не все переменные заданы! Проверь .env файл или Secrets в GitHub:")
-    logger.error("   TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, UNSPLASH_ACCESS_KEY")
+if not all([
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHANNEL_ID,
+    GEMINI_API_KEY,
+    UNSPLASH_ACCESS_KEY
+]):
+    logger.error(
+        "❌ Не все переменные заданы! Проверь .env:"
+    )
+    logger.error(
+        "TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, "
+        "GEMINI_API_KEY, UNSPLASH_ACCESS_KEY"
+    )
     sys.exit(1)
 
 # =============================================================================
-# КОНФИГУРАЦИЯ
+# ФАЙЛЫ
 # =============================================================================
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'topics_history.json')
-MEMORY_DEPTH = 4  # не повторять подтемы ближайшие ~4 недели
 
-# АКТУАЛЬНЫЕ МОДЕЛИ GEMINI (август 2026)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+HISTORY_FILE = os.path.join(
+    BASE_DIR,
+    "content_history.json"
+)
+
+# =============================================================================
+# НАСТРОЙКИ
+# =============================================================================
+
+MEMORY_DEPTH = 20
+
+MIN_QUALITY_SCORE = 7.0
+
+MAX_CAPTION_LENGTH = 1020
+
 TEXT_MODELS = [
-    "gemini-3.6-flash",       # Актуальная модель (рекомендована Google)
-    "gemini-flash-latest",    # Алиас — всегда указывает на последнюю flash-модель
-    "gemini-2.5-flash-lite",  # Легкая версия как fallback
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
 ]
 
 # =============================================================================
-# ТЕМЫ ПО ДНЯМ НЕДЕЛИ
+# РУБРИКИ
 # =============================================================================
+
 THEMES = {
+
     0: {
-        "rubric": "Мотивация недели / фокус",
-        "format_hint": "короткий заряжающий пост, задаёт тон неделе",
+        "rubric": "🔥 Фокус недели",
+        "format_hint": "короткий сильный управленческий пост",
         "topics": [
-            "Одна метрика, на которую стоит смотреть эту неделю",
-            "Вредная привычка руководителя, от которой стоит отказаться на 7 дней",
-            "Мини-вызов: одно управленческое действие, которое нужно сделать до пятницы",
-            "Что я перестал делать как руководитель — и стало легче",
-            "Как настроить команду на продуктивную неделю без давления",
+            "Одна управленческая метрика, на которую стоит смотреть всю неделю",
+            "Привычка руководителя, от которой стоит отказаться",
+            "Одно управленческое действие, которое стоит сделать до пятницы",
+            "Что руководителю стоит перестать контролировать",
+            "Как начать неделю без хаоса и десятков срочных задач"
         ]
     },
+
     1: {
-        "rubric": "Инструмент / шаблон",
+        "rubric": "🛠 Инструмент руководителя",
         "format_hint": "практический инструмент с конкретными шагами",
         "topics": [
-            "Матрица приоритизации задач руководителя",
-            "Шаблон one-to-one встречи с сотрудником",
-            "Чек-лист делегирования без потери контроля",
-            "Скрипт сложного разговора (критика, понижение, увольнение)",
-            "Формула обратной связи (SBI/DESC)",
-            "Таблица распределения ролей в команде",
+            "Матрица приоритетов руководителя",
+            "Как правильно делегировать задачу",
+            "Чек-лист эффективного one-to-one",
+            "Как давать негативную обратную связь",
+            "Как контролировать задачу без микроменеджмента",
+            "Как проводить сложный разговор с сотрудником"
         ]
     },
+
     2: {
-        "rubric": "Короткое наблюдение / инсайт",
-        "format_hint": "короткий пост-мысль, 3-5 предложений, без лонгрида",
+        "rubric": "🧠 Управленческий инсайт",
+        "format_hint": "короткий интеллектуальный пост",
         "topics": [
             "Фраза, которая выдаёт слабого руководителя",
-            "Признак того, что команда вам не доверяет",
-            "Разница между 'занят' и 'эффективен' у менеджера",
-            "Один вопрос, который стоит задавать себе перед каждым решением",
-            "Незаметная ошибка в делегировании",
+            "Почему сотрудники перестают говорить руководителю правду",
+            "Разница между занятостью и эффективностью",
+            "Почему сильные сотрудники иногда начинают сопротивляться",
+            "Как руководитель сам создаёт микроменеджмент"
         ]
     },
+
     3: {
-        "rubric": "Опрос / вовлечение",
-        "format_hint": "пост построен вокруг вопроса аудитории, провоцирует ответы в комментариях",
+        "rubric": "📊 Вопрос руководителям",
+        "format_hint": "пост-вопрос для вовлечения аудитории",
         "topics": [
-            "Как вы принимаете решение, если команда не согласна?",
-            "Что чаще выгорает — вы или ваша команда?",
-            "Сколько встреч one-to-one вы проводите в месяц?",
-            "Что сложнее — нанять или уволить?",
-            "Какой стиль обратной связи вам ближе?",
+            "Что сложнее: нанять или уволить сотрудника?",
+            "Можно ли быть хорошим руководителем без жёсткости?",
+            "Что важнее: результат или атмосфера в команде?",
+            "Нужно ли руководителю дружить с сотрудниками?",
+            "Как вы поступаете, если команда не согласна с решением?"
         ]
     },
+
     4: {
-        "rubric": "Разбор ситуации / вопрос подписчика",
-        "format_hint": "разбор реальной или собирательной управленческой ситуации с выводом",
+        "rubric": "💣 Разбор ситуации",
+        "format_hint": "реалистичная управленческая ситуация и практическое решение",
         "topics": [
-            "Сотрудник постоянно опаздывает — что делать",
-            "Как забрать проект у человека, который не справляется",
-            "Коллега саботирует решения на встречах",
-            "Новый руководитель не может добиться уважения команды",
-            "Как сказать 'нет' вышестоящему руководству",
+            "Сотрудник систематически опаздывает",
+            "Сильный сотрудник начал саботировать решения",
+            "Руководитель потерял авторитет команды",
+            "Сотрудник постоянно перекладывает ответственность",
+            "Коллега публично спорит с руководителем",
+            "Подчинённый не выполняет договорённости"
         ]
     },
+
     5: {
-        "rubric": "Лёгкий формат",
-        "format_hint": "развлекательно-полезный контент под выходной день",
+        "rubric": "📚 Полезное на выходные",
+        "format_hint": "лёгкий, но полезный контент",
         "topics": [
-            "5 книг, изменивших подход к управлению",
-            "Подборка привычек эффективных руководителей",
-            "Забавный или провальный кейс из практики без назидания",
-            "Тест: какой вы тип руководителя",
+            "Книга, которую стоит прочитать руководителю",
+            "Привычки эффективных руководителей",
+            "Инструмент, который экономит время менеджеру",
+            "Ошибка руководителя, которую часто считают нормой",
+            "Интересный управленческий кейс"
         ]
     },
+
     6: {
-        "rubric": "Рефлексия недели",
-        "format_hint": "мягкое подведение итогов + вопрос на подумать перед новой неделей",
+        "rubric": "💭 Рефлексия недели",
+        "format_hint": "спокойный интеллектуальный пост",
         "topics": [
-            "Что вы узнали о себе как о руководителе на этой неделе?",
-            "Один урок из провала за неделю",
-            "Вопрос-размышление без единственно верного ответа",
-            "Благодарность команде + личный вывод",
+            "Главный управленческий урок недели",
+            "Ошибка руководителя, из которой можно извлечь пользу",
+            "Что руководителю стоит изменить на следующей неделе",
+            "Вопрос, который стоит задать себе перед понедельником",
+            "Что команда пытается сказать руководителю своим поведением"
         ]
-    },
+    }
 }
 
 # =============================================================================
-# РАБОТА С ИСТОРИЕЙ
+# AI SYSTEM PROMPT
 # =============================================================================
+
+SYSTEM_PROMPT = """
+Ты — главный редактор современного Telegram-канала
+о лидерстве, управлении командами, эффективности руководителей,
+карьере и современных технологиях.
+
+Аудитория:
+руководители среднего звена, директора, собственники бизнеса,
+руководители подразделений и специалисты, которые хотят стать сильнее
+как управленцы.
+
+Твоя задача — создавать контент, который:
+
+1. хочется открыть;
+2. хочется дочитать;
+3. хочется сохранить;
+4. хочется переслать коллеге;
+5. вызывает желание высказать своё мнение.
+
+СТИЛЬ:
+
+- профессиональный;
+- уверенный;
+- современный;
+- интеллектуальный;
+- конкретный;
+- живой;
+- без инфоцыганства;
+- без банальной мотивации;
+- без канцелярита.
+
+Пиши так, будто автор имеет реальный управленческий опыт.
+
+ЗАПРЕЩЕНО:
+
+- "успешный успех";
+- "выход из зоны комфорта";
+- "никогда не сдавайтесь";
+- "поверьте в себя";
+- очевидные советы;
+- пустые мотивационные фразы;
+- выдуманные исследования;
+- выдуманные цифры;
+- выдуманные цитаты;
+- искусственный пафос.
+
+Каждый пост должен содержать хотя бы одну конкретную мысль,
+которую руководитель может применить на практике.
+
+НЕ РАСТЯГИВАЙ ТЕКСТ.
+
+Лучше 500 сильных символов, чем 1000 пустых.
+
+ЗАГОЛОВОК должен вызывать интерес.
+
+HOOK — первая мысль после заголовка.
+Он должен заставить читать дальше.
+
+ОСНОВНОЙ ТЕКСТ:
+объясняет проблему и даёт конкретный вывод.
+
+CTA:
+естественный вопрос или призыв к действию.
+
+НЕ ПОВТОРЯЙ предыдущие публикации.
+
+Если тема похожа на предыдущий пост,
+измени угол зрения.
+
+Используй HTML:
+
+<b>жирный</b>
+<i>курсив</i>
+
+Не используй Markdown.
+
+Всегда возвращай ТОЛЬКО JSON.
+"""
+
+# =============================================================================
+# ИСТОРИЯ
+# =============================================================================
+
 def load_history():
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось прочитать историю тем: {e}")
-    return {}
+    if not os.path.exists(HISTORY_FILE):
+        return []
+
+    try:
+        with open(
+            HISTORY_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            data = json.load(f)
+
+        if isinstance(data, list):
+            return data
+
+        return []
+
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Ошибка чтения истории: {e}"
+        )
+        return []
 
 
 def save_history(history):
+
     try:
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
+        with open(
+            HISTORY_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                history[-100:],
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
     except Exception as e:
-        logger.warning(f"⚠️ Не удалось сохранить историю тем: {e}")
+        logger.warning(
+            f"⚠️ Ошибка сохранения истории: {e}"
+        )
 
 
-def pick_topic(weekday: int) -> str:
-    """Выбирает подтему для дня недели, избегая последних MEMORY_DEPTH повторов."""
+# =============================================================================
+# ВЫБОР ТЕМЫ
+# =============================================================================
+
+def pick_topic(weekday):
+
     day_data = THEMES[weekday]
+
     pool = day_data["topics"]
 
     history = load_history()
-    key = str(weekday)
-    recent = history.get(key, [])
 
-    # Никогда не исключаем весь пул целиком — всегда оставляем минимум 1 вариант,
-    # иначе при маленьких пулах (например, 4 темы при MEMORY_DEPTH=4) фильтр
-    # обнуляется и тема может повториться сразу на следующей неделе
-    max_memory = min(MEMORY_DEPTH, len(pool) - 1)
-    exclude = recent[-max_memory:] if max_memory > 0 else []
+    recent_topics = [
+        item.get("topic", "")
+        for item in history[-MEMORY_DEPTH:]
+    ]
 
-    candidates = [t for t in pool if t not in exclude]
+    candidates = [
+        topic
+        for topic in pool
+        if topic not in recent_topics
+    ]
+
     if not candidates:
         candidates = pool
 
     topic = random.choice(candidates)
 
-    recent.append(topic)
-    history[key] = recent[-MEMORY_DEPTH * 2:]
-    save_history(history)
+    logger.info(
+        f"🎯 Выбрана тема: {topic}"
+    )
 
     return topic
 
 
-def get_prompt_for_today():
+# =============================================================================
+# ПРОМПТ ГЕНЕРАЦИИ
+# =============================================================================
+
+def build_generation_prompt():
+
     weekday = datetime.now().weekday()
+
     day_data = THEMES[weekday]
+
     topic = pick_topic(weekday)
 
-    prompt = f"""Напиши пост для Telegram-канала про лидерство и управление командой для руководителей среднего звена.
+    history = load_history()
 
-Рубрика дня: {day_data['rubric']}
-Формат: {day_data['format_hint']}
-Конкретная тема поста: {topic}
+    recent_titles = [
+        item.get("title", "")
+        for item in history[-10:]
+        if item.get("title")
+    ]
 
-Требования к оформлению:
-- Напиши содержательный текст объемом примерно 500-800 символов, чтобы он гарантированно целиком поместился в подпись к картинке (лимит Telegram 1024 символа).
-- 2-3 эмодзи.
-- 2-3 хэштега в самом конце.
-- Вопрос аудитории или призыв к действию в конце.
-- Используй HTML-теги для форматирования: <b>жирный</b>, <i>курсив</i>.
-- ВЫДАВАЙ ТОЛЬКО ГОТОВЫЙ ТЕКСТ ПОСТА. Никаких размышлений, комментариев модели, счетчиков слов и пояснений.
+    history_text = "\n".join(
+        f"- {title}"
+        for title in recent_titles
+    )
+
+    prompt = f"""
+Сегодня:
+{datetime.now().strftime("%Y-%m-%d")}
+
+Рубрика:
+{day_data["rubric"]}
+
+Формат:
+{day_data["format_hint"]}
+
+Тема:
+{topic}
+
+Последние заголовки канала:
+
+{history_text}
+
+Создай новую публикацию.
+
+Она должна отличаться от предыдущих публикаций
+не только формулировкой, но и углом зрения.
+
+Верни JSON строго следующего формата:
+
+{{
+  "title": "короткий сильный заголовок",
+  "hook": "цепляющая первая мысль",
+  "body": "основной текст",
+  "cta": "вопрос аудитории",
+  "hashtags": ["#управление", "#лидерство"],
+  "image_query": "короткий английский запрос для Unsplash",
+  "rubric": "{day_data["rubric"]}"
+}}
+
+Ограничения:
+
+title — желательно до 90 символов.
+
+body + hook + cta + hashtags должны вместе
+умещаться примерно в 900 символов.
+
+Не используй выдуманные факты.
+
+image_query пиши на английском языке.
+
+Не добавляй никаких комментариев вне JSON.
 """
-    return prompt, topic, day_data
+
+    return prompt, topic, day_data["rubric"]
 
 
 # =============================================================================
-# GEMINI API — ГЕНЕРАЦИЯ ТЕКСТА
+# GEMINI
 # =============================================================================
-def get_available_models():
-    """Получает список доступных моделей Gemini через API."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
-    
-    try:
-        response = requests.get(url, timeout=(5, 15))
-        if response.status_code == 200:
-            data = response.json()
-            models = data.get("models", [])
-            available = [
-                m["name"].replace("models/", "") 
-                for m in models 
-                if "generateContent" in m.get("supportedGenerationMethods", [])
-            ]
-            logger.info(f"📋 Доступные модели Gemini: {', '.join(available[:10])}")
-            return available
-        return []
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось получить список моделей: {e}")
-        return []
 
+def call_gemini(
+    model_name,
+    prompt
+):
 
-def call_gemini_text(model_name: str, prompt_text: str):
-    """Запрашивает текст у Gemini. Возвращает текст или None."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    url = (
+        "https://generativelanguage.googleapis.com/"
+        f"v1beta/models/{model_name}:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
+
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "title": {
+                "type": "STRING"
+            },
+            "hook": {
+                "type": "STRING"
+            },
+            "body": {
+                "type": "STRING"
+            },
+            "cta": {
+                "type": "STRING"
+            },
+            "hashtags": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "STRING"
+                }
+            },
+            "image_query": {
+                "type": "STRING"
+            },
+            "rubric": {
+                "type": "STRING"
+            }
+        },
+        "required": [
+            "title",
+            "hook",
+            "body",
+            "cta",
+            "hashtags",
+            "image_query",
+            "rubric"
+        ]
+    }
 
     payload = {
-        "contents": [{"parts": [{"text": prompt_text}]}],
+
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": SYSTEM_PROMPT
+                        + "\n\n"
+                        + prompt
+                    }
+                ]
+            }
+        ],
+
         "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 4000
+
+            "temperature": 0.75,
+
+            "maxOutputTokens": 3000,
+
+            "responseMimeType": "application/json",
+
+            "responseSchema": schema
         }
     }
 
     try:
-        logger.info(f"⏳ Пробуем {model_name} для текста...")
-        response = requests.post(url, json=payload, timeout=(10, 60))
+
+        logger.info(
+            f"🤖 Запрашиваем Gemini: {model_name}"
+        )
+
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=(10, 90)
+        )
+
         data = response.json()
 
         if response.status_code != 200:
-            error_msg = json.dumps(data, ensure_ascii=False)[:400]
-            logger.warning(f"⚠️ {model_name} HTTP {response.status_code}: {error_msg}")
+
+            logger.warning(
+                f"⚠️ Gemini {model_name}: "
+                f"HTTP {response.status_code}"
+            )
+
+            logger.warning(
+                json.dumps(
+                    data,
+                    ensure_ascii=False
+                )[:1000]
+            )
+
             return None
 
-        candidates = data.get("candidates", [])
+        candidates = data.get(
+            "candidates",
+            []
+        )
+
         if not candidates:
-            logger.warning(f"⚠️ {model_name}: пустой candidates")
+            logger.warning(
+                "⚠️ Gemini вернул пустой candidates"
+            )
             return None
 
-        parts = candidates[0].get("content", {}).get("parts", [])
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
         if not parts:
-            logger.warning(f"⚠️ {model_name}: пустой parts")
             return None
 
-        text = parts[0].get("text", "").strip()
-        finish_reason = candidates[0].get("finishReason", "UNKNOWN")
+        raw_text = parts[0].get(
+            "text",
+            ""
+        ).strip()
 
-        logger.info(f"📊 {model_name}: finishReason={finish_reason}, длина={len(text)}")
+        if not raw_text:
+            return None
 
-        if text and len(text) > 20:
-            return text
+        logger.info(
+            f"📦 Получен JSON: "
+            f"{len(raw_text)} символов"
+        )
+
+        try:
+
+            result = json.loads(raw_text)
+
+        except json.JSONDecodeError:
+
+            logger.warning(
+                "⚠️ Gemini вернул некорректный JSON"
+            )
+
+            return None
+
+        return result
+
+    except requests.exceptions.Timeout:
+
+        logger.warning(
+            f"⏱️ Timeout Gemini {model_name}"
+        )
+
         return None
 
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка {model_name}: {e}")
+
+        logger.warning(
+            f"⚠️ Ошибка Gemini: {e}"
+        )
+
         return None
 
 
-def generate_post():
-    """Возвращает (текст_поста, тема, рубрика) или (None, None, None) при неудаче."""
-    prompt_text, topic, day_data = get_prompt_for_today()
+# =============================================================================
+# AI РЕДАКТОР
+# =============================================================================
+
+def edit_post(post):
+
+    prompt = f"""
+Ты получил черновик Telegram-публикации.
+
+Проверь его как строгий главный редактор.
+
+ЧЕРНОВИК:
+
+Заголовок:
+{post.get("title", "")}
+
+Hook:
+{post.get("hook", "")}
+
+Текст:
+{post.get("body", "")}
+
+CTA:
+{post.get("cta", "")}
+
+Хэштеги:
+{post.get("hashtags", [])}
+
+Проверь:
+
+1. Есть ли сильный hook?
+2. Нет ли банальностей?
+3. Есть ли конкретная польза?
+4. Не повторяет ли пост очевидные советы?
+5. Хороший ли заголовок?
+6. Вызывает ли CTA желание ответить?
+7. Нет ли выдуманных фактов?
+8. Не слишком ли много текста?
+
+Оценка от 1 до 10.
+
+Верни JSON:
+
+{{
+  "quality_score": 8.5,
+  "title": "...",
+  "hook": "...",
+  "body": "...",
+  "cta": "...",
+  "hashtags": ["#управление", "#лидерство"],
+  "image_query": "...",
+  "editor_comment": "короткий комментарий"
+}}
+
+Если текст можно улучшить —
+ИСПРАВЬ его.
+
+Не просто оценивай.
+
+Верни только JSON.
+"""
+
+    result = None
 
     for model in TEXT_MODELS:
-        text = call_gemini_text(model, prompt_text)
-        if text:
-            if len(text) > 1024:
-                logger.warning(f"⚠️ Текст от модели слишком длинный ({len(text)} симв.). Обрезаем до 1020 символов.")
-                text = text[:1020].rsplit(' ', 1)[0] + "…"
 
-            logger.info(f"✅ Текст готов: {len(text)} символов")
-            return text, topic, day_data["rubric"]
+        result = call_gemini(
+            model,
+            prompt
+        )
 
-    logger.error("❌ Все текстовые модели вернули пустой/короткий текст")
-    return None, None, None
+        if result:
+            break
 
+    if not result:
+        logger.warning(
+            "⚠️ AI Editor не смог обработать пост"
+        )
+        return post
 
-# =============================================================================
-# UNSPLASH API — ПОЛУЧЕНИЕ РЕАЛЬНЫХ ФОТО
-# =============================================================================
-def generate_image(topic: str, rubric: str):
-    """Получает качественное реальное фото с Unsplash по ключевым словам."""
-    
-    # Используем ТОЛЬКО короткие английские ключевые слова
-    # Unsplash не понимает длинные русские фразы
-    base_keywords = [
-        "minimalist workspace",
-        "wooden desk",
-        "office plants", 
-        "coffee cup",
-        "notebook",
-        "soft light",
-        "team meeting",
-        "business planning",
-        "leadership concept",
-        "scandinavian interior"
-    ]
-    
-    # Выбираем 3-4 случайных ключевых слова для разнообразия фото
-    selected_keywords = random.sample(base_keywords, min(4, len(base_keywords)))
-    query = urllib.parse.quote(" ".join(selected_keywords))
-    
-    # URL API Unsplash
-    url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape&content_filter=high&w=1200&h=630&client_id={UNSPLASH_ACCESS_KEY}"
-    
-    headers = {
-        "Accept-Version": "v1"
-    }
-    
     try:
-        logger.info(f"⏳ Ищем фото на Unsplash: {query}...")
-        response = requests.get(url, headers=headers, timeout=(5, 15))
-        
-        if response.status_code == 200:
-            data = response.json()
-            image_url = data.get("urls", {}).get("regular")
-            download_url = data.get("urls", {}).get("full")
-            
-            final_url = download_url if download_url else image_url
-            
-            if final_url:
-                img_response = requests.get(final_url, timeout=(5, 15))
-                if img_response.status_code == 200 and len(img_response.content) > 1000:
-                    photographer = data.get('user', {}).get('name', 'Unknown')
-                    logger.info(f"✅ Фото найдено и загружено: {len(img_response.content)} байт (Автор: {photographer})")
-                    return img_response.content
-                else:
-                    logger.warning("⚠️ Пустой ответ при скачивании изображения")
-                    return None
-                    
-        elif response.status_code == 401:
-            logger.error("❌ Неверный UNSPLASH_ACCESS_KEY! Проверьте ключ в .env или Secrets GitHub.")
+
+        score = float(
+            result.get(
+                "quality_score",
+                0
+            )
+        )
+
+    except Exception:
+
+        score = 0
+
+    logger.info(
+        f"📝 Оценка редактора: {score}/10"
+    )
+
+    if score < MIN_QUALITY_SCORE:
+
+        logger.warning(
+            f"⚠️ Пост получил только {score}/10"
+        )
+
+        # Не блокируем публикацию полностью.
+        # Иначе канал может остаться без поста.
+        # Позже сделаем автоматическую регенерацию.
+        result["quality_warning"] = True
+
+    return result
+
+
+# =============================================================================
+# ФОРМИРОВАНИЕ TELEGRAM ТЕКСТА
+# =============================================================================
+
+def build_telegram_text(post):
+
+    title = post.get(
+        "title",
+        ""
+    ).strip()
+
+    hook = post.get(
+        "hook",
+        ""
+    ).strip()
+
+    body = post.get(
+        "body",
+        ""
+    ).strip()
+
+    cta = post.get(
+        "cta",
+        ""
+    ).strip()
+
+    hashtags = post.get(
+        "hashtags",
+        []
+    )
+
+    if not isinstance(
+        hashtags,
+        list
+    ):
+        hashtags = []
+
+    hashtags_text = " ".join(
+        str(x).strip()
+        for x in hashtags[:3]
+        if str(x).strip()
+    )
+
+    parts = []
+
+    if title:
+        parts.append(
+            f"<b>{html.escape(title)}</b>"
+        )
+
+    if hook:
+        parts.append(
+            html.escape(hook)
+        )
+
+    if body:
+        parts.append(
+            html.escape(body)
+        )
+
+    if cta:
+        parts.append(
+            f"<i>{html.escape(cta)}</i>"
+        )
+
+    if hashtags_text:
+        parts.append(
+            html.escape(hashtags_text)
+        )
+
+    text = "\n\n".join(parts)
+
+    if len(text) > MAX_CAPTION_LENGTH:
+
+        logger.warning(
+            f"⚠️ Пост слишком длинный: "
+            f"{len(text)} символов"
+        )
+
+        text = (
+            text[:MAX_CAPTION_LENGTH]
+            .rsplit(" ", 1)[0]
+            + "…"
+        )
+
+    return text
+
+
+# =============================================================================
+# UNSPLASH
+# =============================================================================
+
+def generate_image(
+    image_query
+):
+
+    if not image_query:
+        image_query = "modern business leadership"
+
+    query = urllib.parse.quote(
+        image_query
+    )
+
+    url = (
+        "https://api.unsplash.com/photos/random"
+        f"?query={query}"
+        "&orientation=landscape"
+        "&content_filter=high"
+        "&client_id="
+        f"{UNSPLASH_ACCESS_KEY}"
+    )
+
+    try:
+
+        logger.info(
+            f"🖼️ Ищем изображение: "
+            f"{image_query}"
+        )
+
+        response = requests.get(
+            url,
+            headers={
+                "Accept-Version": "v1"
+            },
+            timeout=(5, 20)
+        )
+
+        if response.status_code != 200:
+
+            logger.warning(
+                f"⚠️ Unsplash HTTP "
+                f"{response.status_code}"
+            )
+
             return None
-            
-        elif response.status_code == 404:
-            logger.warning("⚠️ Unsplash не нашел фото по запросу. Пробуем fallback...")
-            # Fallback: пробуем самый простой запрос
-            fallback_queries = ["workspace", "office desk", "business meeting", "planning"]
-            for fallback_query in fallback_queries:
-                fallback_url = f"https://api.unsplash.com/photos/random?query={fallback_query}&orientation=landscape&content_filter=high&w=1200&h=630&client_id={UNSPLASH_ACCESS_KEY}"
-                try:
-                    fallback_response = requests.get(fallback_url, headers=headers, timeout=(5, 15))
-                    if fallback_response.status_code == 200:
-                        data = fallback_response.json()
-                        image_url = data.get("urls", {}).get("regular")
-                        if image_url:
-                            img_response = requests.get(image_url, timeout=(5, 15))
-                            if img_response.status_code == 200 and len(img_response.content) > 1000:
-                                photographer = data.get('user', {}).get('name', 'Unknown')
-                                logger.info(f"✅ Фото найдено (fallback: {fallback_query}): {len(img_response.content)} байт (Автор: {photographer})")
-                                return img_response.content
-                except Exception as e:
-                    logger.warning(f"⚠️ Ошибка fallback запроса '{fallback_query}': {e}")
-                    continue
-            logger.warning("⚠️ Все fallback запросы не дали результата")
+
+        data = response.json()
+
+        image_url = (
+            data
+            .get("urls", {})
+            .get("regular")
+        )
+
+        if not image_url:
             return None
-            
-        elif response.status_code == 429:
-            logger.warning("⚠️ Превышен лимит запросов к Unsplash API (50 в час)")
-            return None
-        else:
-            logger.warning(f"⚠️ Unsplash API error: HTTP {response.status_code}")
-            return None
-            
-    except requests.exceptions.Timeout:
-        logger.warning("⏱️ Превышено время ожидания Unsplash API")
+
+        image_response = requests.get(
+            image_url,
+            timeout=(5, 30)
+        )
+
+        if (
+            image_response.status_code == 200
+            and len(image_response.content) > 1000
+        ):
+
+            photographer = (
+                data
+                .get("user", {})
+                .get("name", "Unknown")
+            )
+
+            logger.info(
+                f"✅ Фото получено. "
+                f"Автор: {photographer}"
+            )
+
+            return image_response.content
+
         return None
+
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка загрузки фото с Unsplash: {e}")
+
+        logger.warning(
+            f"⚠️ Ошибка Unsplash: {e}"
+        )
+
         return None
 
 
 # =============================================================================
-# TELEGRAM — ПУБЛИКАЦИЯ
+# TELEGRAM
 # =============================================================================
-def publish_to_telegram(text):
-    """Публикует обычное текстовое сообщение (fallback)."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+def publish_photo(
+    image_bytes,
+    text
+):
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    )
+
+    files = {
+        "photo": (
+            "cover.jpg",
+            image_bytes,
+            "image/jpeg"
+        )
+    }
+
+    data = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "caption": text,
+        "parse_mode": "HTML",
+        "show_caption_above_media": False
+    }
+
+    try:
+
+        response = requests.post(
+            url,
+            data=data,
+            files=files,
+            timeout=(10, 60)
+        )
+
+        result = response.json()
+
+        if (
+            response.status_code == 200
+            and result.get("ok")
+        ):
+
+            message_id = (
+                result["result"]["message_id"]
+            )
+
+            logger.info(
+                f"✅ Пост опубликован. "
+                f"Message ID: {message_id}"
+            )
+
+            return message_id
+
+        logger.error(
+            f"❌ Telegram error: {result}"
+        )
+
+        return None
+
+    except Exception as e:
+
+        logger.error(
+            f"❌ Ошибка Telegram: {e}"
+        )
+
+        return None
+
+
+def publish_text(text):
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
     payload = {
         "chat_id": TELEGRAM_CHANNEL_ID,
         "text": text,
@@ -400,76 +966,243 @@ def publish_to_telegram(text):
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=(5, 30))
-        data = response.json()
 
-        if response.status_code == 200 and data.get("ok"):
-            logger.info(f"✅ Пост опубликован (текстом)! Message ID: {data['result']['message_id']}")
-            return True
-        else:
-            logger.error(f"❌ Ошибка Telegram: {data}")
-            return False
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=(5, 30)
+        )
+
+        result = response.json()
+
+        if (
+            response.status_code == 200
+            and result.get("ok")
+        ):
+
+            message_id = (
+                result["result"]["message_id"]
+            )
+
+            logger.info(
+                f"✅ Текст опубликован. "
+                f"Message ID: {message_id}"
+            )
+
+            return message_id
+
+        logger.error(
+            f"❌ Telegram error: {result}"
+        )
+
+        return None
 
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки: {e}")
-        return False
+
+        logger.error(
+            f"❌ Ошибка Telegram: {e}"
+        )
+
+        return None
 
 
-def publish_photo_to_telegram(image_bytes: bytes, text: str):
-    """Публикует фото вместе с текстом в качестве единой подписи (caption)."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    
-    files = {"photo": ("cover.jpg", image_bytes, "image/jpeg")}
-    data = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
-        "caption": text,
-        "parse_mode": "HTML",
+# =============================================================================
+# СОХРАНЕНИЕ ИСТОРИИ
+# =============================================================================
+
+def save_post_history(
+    post,
+    topic,
+    message_id
+):
+
+    history = load_history()
+
+    record = {
+
+        "date": datetime.now().isoformat(),
+
+        "topic": topic,
+
+        "title": post.get(
+            "title",
+            ""
+        ),
+
+        "rubric": post.get(
+            "rubric",
+            ""
+        ),
+
+        "quality_score": post.get(
+            "quality_score",
+            None
+        ),
+
+        "image_query": post.get(
+            "image_query",
+            ""
+        ),
+
+        "message_id": message_id
     }
 
-    try:
-        response = requests.post(url, data=data, files=files, timeout=(10, 60))
-        resp_json = response.json()
+    history.append(record)
 
-        if response.status_code == 200 and resp_json.get("ok"):
-            logger.info(f"✅ Пост с картинкой и текстом опубликован единым сообщением! Message ID: {resp_json['result']['message_id']}")
-            return True
-        else:
-            logger.error(f"❌ Ошибка отправки фото в Telegram: {resp_json}")
-            return False
+    save_history(history)
 
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки фото: {e}")
-        return False
+    logger.info(
+        "💾 История публикации сохранена"
+    )
 
 
 # =============================================================================
-# ГЛАВНЫЙ ЦИКЛ
+# ГЕНЕРАЦИЯ ПОСТА
 # =============================================================================
+
+def generate_post():
+
+    prompt, topic, rubric = (
+        build_generation_prompt()
+    )
+
+    generated = None
+
+    for model in TEXT_MODELS:
+
+        generated = call_gemini(
+            model,
+            prompt
+        )
+
+        if generated:
+            logger.info(
+                f"✅ Черновик создан через {model}"
+            )
+            break
+
+    if not generated:
+
+        logger.error(
+            "❌ Не удалось создать пост"
+        )
+
+        return None, None
+
+    # AI Editor
+    edited = edit_post(
+        generated
+    )
+
+    edited["rubric"] = rubric
+
+    text = build_telegram_text(
+        edited
+    )
+
+    logger.info(
+        f"📏 Размер Telegram-поста: "
+        f"{len(text)} символов"
+    )
+
+    return edited, topic
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
 def main():
-    logger.info("🚀 Запуск автопостинга...")
-    
-    available = get_available_models()
-    if available:
-        logger.info(f"📋 Найдено {len(available)} доступных моделей Gemini")
 
-    post_text, topic, rubric = generate_post()
-    if not post_text:
-        logger.error("❌ Не удалось сгенерировать текст поста. Завершение.")
+    logger.info(
+        "========================================"
+    )
+
+    logger.info(
+        "🚀 ЗАПУСК TELEGRAM AI EDITOR V2"
+    )
+
+    logger.info(
+        "========================================"
+    )
+
+    post, topic = generate_post()
+
+    if not post:
+
+        logger.error(
+            "❌ Генерация завершилась ошибкой"
+        )
+
         sys.exit(1)
 
-    image_bytes = generate_image(topic, rubric)
+    logger.info(
+        f"📰 Заголовок: "
+        f"{post.get('title', '')}"
+    )
+
+    logger.info(
+        f"🎯 Качество: "
+        f"{post.get('quality_score', 'N/A')}/10"
+    )
+
+    telegram_text = build_telegram_text(
+        post
+    )
+
+    image_query = post.get(
+        "image_query",
+        ""
+    )
+
+    image_bytes = generate_image(
+        image_query
+    )
+
+    message_id = None
 
     if image_bytes:
-        success = publish_photo_to_telegram(image_bytes, post_text)
-    else:
-        logger.warning("⚠️ Картинка не получена — публикуем только текст (fallback)")
-        success = publish_to_telegram(post_text)
 
-    if not success:
-        logger.error("❌ Не удалось опубликовать пост. Завершение.")
+        message_id = publish_photo(
+            image_bytes,
+            telegram_text
+        )
+
+    else:
+
+        logger.warning(
+            "⚠️ Изображение не получено."
+        )
+
+        message_id = publish_text(
+            telegram_text
+        )
+
+    if not message_id:
+
+        logger.error(
+            "❌ Публикация не удалась"
+        )
+
         sys.exit(1)
 
-    logger.info("🎉 Готово! Пост успешно опубликован.")
+    save_post_history(
+        post,
+        topic,
+        message_id
+    )
+
+    logger.info(
+        "========================================"
+    )
+
+    logger.info(
+        "🎉 V2 УСПЕШНО ЗАВЕРШИЛА РАБОТУ"
+    )
+
+    logger.info(
+        "========================================"
+    )
 
 
 if __name__ == "__main__":
