@@ -2,7 +2,8 @@ name: Auto Post to Telegram
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    # Каждый день в 06:00 UTC
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -25,7 +26,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
@@ -39,9 +40,11 @@ jobs:
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          GEMINI_MODEL: gemini-3.6-flash
         run: python autopost.py
 
       - name: Save content history
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
