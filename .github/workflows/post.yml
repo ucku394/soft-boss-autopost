@@ -2,24 +2,53 @@ name: Auto Post to Telegram
 
 on:
   schedule:
+    # 06:00 UTC
     - cron: '0 6 * * *'
+
   workflow_dispatch:
+
+# Не позволяем двум автопостам работать одновременно.
+concurrency:
+  group: auto-post-to-telegram
+  cancel-in-progress: false
 
 jobs:
   post:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
+      # ------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------
+      # Python
+      # ------------------------------------------------------
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+
+      # ------------------------------------------------------
+      # Dependencies
+      # ------------------------------------------------------
 
       - name: Install dependencies
-        run: pip install python-dotenv requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv
+
+      # ------------------------------------------------------
+      # Autopost
+      # ------------------------------------------------------
 
       - name: Run autopost
         env:
@@ -27,16 +56,28 @@ jobs:
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-        run: python autopost.py
+        run: |
+          python autopost.py
 
-      - name: Save topics history
+      # ------------------------------------------------------
+      # Save history
+      # ------------------------------------------------------
+
+      - name: Save content history
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- topics_history.json; then
-            echo "История не изменилась, коммитить нечего"
-          else
-            git add topics_history.json
-            git commit -m "chore: update topics history [skip ci]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Проверяем и изменённые, и новые файлы.
+          if git status --porcelain -- content_history.json | grep -q .; then
+            echo "История изменилась — сохраняем."
+
+            git add content_history.json
+
+            git commit \
+              -m "chore: update content history [skip ci]"
+
             git push
+          else
+            echo "История не изменилась, коммитить нечего."
           fi
