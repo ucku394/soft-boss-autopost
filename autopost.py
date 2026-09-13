@@ -6,7 +6,7 @@ import logging
 import re
 import html
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 
 import requests
@@ -30,7 +30,6 @@ UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 # GEMINI
 # ============================================================
 
-# Используем Gemini 3.6 Flash
 GEMINI_MODELS = [
     "gemini-3.6-flash"
 ]
@@ -40,27 +39,29 @@ GEMINI_MODELS = [
 # HISTORY / LIMITS
 # ============================================================
 
+# ВАЖНО:
+# Это имя должно совпадать с именем файла в GitHub Actions.
 HISTORY_FILE = "content_history.json"
 
-# Сколько недель защищаем от повторов
+# Сколько недель защищаем от повторов.
 ANTI_REPEAT_WEEKS = 8
 
-# Сколько последних записей максимум храним
+# Максимальное количество записей в истории.
 MAX_HISTORY_RECORDS = 200
 
-# Сколько записей передаём Gemini
+# Сколько последних записей передаём Gemini.
 MEMORY_DEPTH = 40
 
-# Максимум попыток подобрать новую тему
+# Максимум попыток подобрать новую тему.
 MAX_TOPIC_ATTEMPTS = 5
 
-# Если Gemini считает темы похожими на 75%+
-# считаем тему повтором
+# Порог сходства.
 SIMILARITY_THRESHOLD = 0.75
 
-# Telegram caption
+# Telegram caption.
 MAX_TELEGRAM_CAPTION = 1024
 
+# Ограничения отдельных частей поста.
 MAX_TITLE_LENGTH = 90
 MAX_HOOK_LENGTH = 220
 MAX_BODY_LENGTH = 650
@@ -69,6 +70,7 @@ MAX_CTA_LENGTH = 180
 MIN_HASHTAGS = 2
 MAX_HASHTAGS = 3
 
+# Минимальная оценка редактора.
 QUALITY_THRESHOLD = 7
 
 
@@ -190,14 +192,14 @@ def clean_ai_text(value):
 
     value = str(value)
 
-    # zero-width
+    # Zero-width characters.
     value = re.sub(
         r"[\u200b-\u200f\u2060\ufeff]",
         "",
         value
     )
 
-    # code fences
+    # Code fences.
     value = re.sub(
         r"```(?:text|markdown|html|json)?",
         "",
@@ -210,7 +212,7 @@ def clean_ai_text(value):
         ""
     )
 
-    # HTML
+    # Удаляем HTML.
     value = re.sub(
         r"<[^>]+>",
         "",
@@ -388,15 +390,12 @@ def normalize_hashtag(value):
     if not value:
         return ""
 
-    if contains_prompt_injection(
-        value
-    ):
+    if contains_prompt_injection(value):
         return ""
 
     if not value.startswith("#"):
         value = "#" + value
 
-    # Только # + буквы/цифры/_
     if not re.fullmatch(
         r"#[\w]+",
         value,
@@ -428,10 +427,7 @@ def sanitize_hashtags(values):
     seen = set()
 
     for value in values:
-
-        hashtag = normalize_hashtag(
-            value
-        )
+        hashtag = normalize_hashtag(value)
 
         if not hashtag:
             continue
@@ -451,43 +447,29 @@ def sanitize_hashtags(values):
 
 
 def ensure_hashtags(values, text=""):
-    hashtags = sanitize_hashtags(
-        values
-    )
+    hashtags = sanitize_hashtags(values)
 
     text_lower = text.lower()
 
     additional = []
 
     if "делег" in text_lower:
-        additional.append(
-            "#делегирование"
-        )
+        additional.append("#делегирование")
 
     if "команд" in text_lower:
-        additional.append(
-            "#команда"
-        )
+        additional.append("#команда")
 
     if "лидер" in text_lower:
-        additional.append(
-            "#лидерство"
-        )
+        additional.append("#лидерство")
 
     if "решен" in text_lower:
-        additional.append(
-            "#решения"
-        )
+        additional.append("#решения")
 
     if "обратн" in text_lower:
-        additional.append(
-            "#обратнаясвязь"
-        )
+        additional.append("#обратнаясвязь")
 
     if "книг" in text_lower:
-        additional.append(
-            "#книги"
-        )
+        additional.append("#книги")
 
     additional.extend([
         "#управление",
@@ -501,23 +483,14 @@ def ensure_hashtags(values, text=""):
     }
 
     for hashtag in additional:
-
-        hashtag = normalize_hashtag(
-            hashtag
-        )
+        hashtag = normalize_hashtag(hashtag)
 
         if not hashtag:
             continue
 
         if hashtag.casefold() not in existing:
-
-            hashtags.append(
-                hashtag
-            )
-
-            existing.add(
-                hashtag.casefold()
-            )
+            hashtags.append(hashtag)
+            existing.add(hashtag.casefold())
 
         if len(hashtags) >= MAX_HASHTAGS:
             break
@@ -543,28 +516,20 @@ def telegram_visible_length(value):
         value
     )
 
-    plain = html.unescape(
-        plain
-    )
+    plain = html.unescape(plain)
 
     return len(
-        plain.encode(
-            "utf-16-le"
-        )
+        plain.encode("utf-16-le")
     ) // 2
 
 
 def shorten_text(value, max_length):
-    value = clean_ai_text(
-        value
-    )
+    value = clean_ai_text(value)
 
     if len(value) <= max_length:
         return value
 
-    shortened = value[
-        :max_length - 1
-    ]
+    shortened = value[:max_length - 1]
 
     if " " in shortened:
         shortened = shortened.rsplit(
@@ -584,31 +549,31 @@ def shorten_text(value, max_length):
 # ============================================================
 
 def load_history():
-    if not os.path.exists(
-        HISTORY_FILE
-    ):
+    if not os.path.exists(HISTORY_FILE):
         return []
 
     try:
-
         with open(
             HISTORY_FILE,
             "r",
             encoding="utf-8"
         ) as file:
+            data = json.load(file)
 
-            data = json.load(
-                file
-            )
-
-        if isinstance(
-            data,
-            list
-        ):
+        if isinstance(data, list):
             return data
 
-    except Exception as e:
+        logging.warning(
+            "⚠️ История имеет неправильный формат."
+        )
 
+    except json.JSONDecodeError as e:
+        logging.warning(
+            "⚠️ История содержит повреждённый JSON: %s",
+            e
+        )
+
+    except OSError as e:
         logging.warning(
             "⚠️ Не удалось прочитать историю: %s",
             e
@@ -618,6 +583,9 @@ def load_history():
 
 
 def parse_history_date(item):
+    if not isinstance(item, dict):
+        return None
+
     value = (
         item.get("published_at")
         or item.get("date")
@@ -629,17 +597,26 @@ def parse_history_date(item):
         return None
 
     try:
-
-        return datetime.fromisoformat(
+        parsed = datetime.fromisoformat(
             value.replace(
                 "Z",
                 "+00:00"
             )
-        ).replace(
-            tzinfo=None
         )
 
-    except Exception:
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(
+                timezone.utc
+            ).replace(
+                tzinfo=None
+            )
+
+        return parsed
+
+    except (
+        TypeError,
+        ValueError
+    ):
         return None
 
 
@@ -647,7 +624,9 @@ def get_recent_history():
     history = load_history()
 
     cutoff = (
-        datetime.now()
+        datetime.now(timezone.utc).replace(
+            tzinfo=None
+        )
         - timedelta(
             weeks=ANTI_REPEAT_WEEKS
         )
@@ -656,13 +635,10 @@ def get_recent_history():
     recent = []
 
     for item in history:
+        date = parse_history_date(item)
 
-        date = parse_history_date(
-            item
-        )
-
-        # Старые записи V3 без даты
-        # тоже учитываем.
+        # Старые записи без даты учитываем,
+        # чтобы не потерять защиту от старых повторов.
         if date is None:
             recent.append(item)
             continue
@@ -677,7 +653,9 @@ def save_history(post, topic):
     history = load_history()
 
     record = {
-        "published_at": datetime.now().isoformat(),
+        "published_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
 
         "topic": topic,
 
@@ -696,8 +674,6 @@ def save_history(post, topic):
             []
         ),
 
-        # Сохраняем небольшой фрагмент тела,
-        # чтобы Gemini видел не только название.
         "summary": shorten_text(
             post.get(
                 "body",
@@ -707,22 +683,16 @@ def save_history(post, topic):
         ),
     }
 
-    history.append(
-        record
-    )
+    history.append(record)
 
-    history = history[
-        -MAX_HISTORY_RECORDS:
-    ]
+    history = history[-MAX_HISTORY_RECORDS:]
 
     try:
-
         with open(
             HISTORY_FILE,
             "w",
             encoding="utf-8"
         ) as file:
-
             json.dump(
                 history,
                 file,
@@ -730,12 +700,13 @@ def save_history(post, topic):
                 indent=2
             )
 
-    except Exception as e:
-
-        logging.warning(
-            "⚠️ Не удалось сохранить историю: %s",
+    except OSError as e:
+        logging.error(
+            "❌ Не удалось сохранить историю: %s",
             e
         )
+
+        raise
 
 
 # ============================================================
@@ -743,22 +714,20 @@ def save_history(post, topic):
 # ============================================================
 
 def get_today_theme():
-    weekday = datetime.now().weekday()
+    weekday = datetime.now(
+        timezone.utc
+    ).weekday()
 
     themes = THEMES.get(
         weekday,
         THEMES[0]
     )
 
-    return random.choice(
-        themes
-    )
+    return random.choice(themes)
 
 
 def protect_prompt_data(value):
-    value = str(
-        value or ""
-    )
+    value = str(value or "")
 
     value = value.replace(
         "<<<",
@@ -809,9 +778,7 @@ RUSSIAN_STOPWORDS = {
 
 
 def normalize_topic_words(text):
-    text = str(
-        text or ""
-    ).lower()
+    text = str(text or "").lower()
 
     text = text.replace(
         "ё",
@@ -839,14 +806,6 @@ def local_topic_similarity(
     new_topic,
     old_topic
 ):
-    """
-    Быстрая локальная проверка.
-
-    Используем два метода:
-    1. сходство текста;
-    2. сходство ключевых слов.
-    """
-
     new_topic = str(
         new_topic or ""
     ).lower()
@@ -880,20 +839,16 @@ def local_topic_similarity(
     )
 
     if new_words or old_words:
-
         intersection = (
-            new_words
-            & old_words
+            new_words & old_words
         )
 
         union = (
-            new_words
-            | old_words
+            new_words | old_words
         )
 
         keyword_score = (
-            len(intersection)
-            / len(union)
+            len(intersection) / len(union)
             if union
             else 0
         )
@@ -901,7 +856,6 @@ def local_topic_similarity(
     else:
         keyword_score = 0
 
-    # Берём наиболее сильный сигнал
     return max(
         sequence_score,
         keyword_score
@@ -916,6 +870,8 @@ def get_topic_similarity_local(
     best_item = None
 
     for item in history:
+        if not isinstance(item, dict):
+            continue
 
         old_topic = (
             item.get("topic")
@@ -923,13 +879,15 @@ def get_topic_similarity_local(
             or ""
         )
 
+        if not old_topic:
+            continue
+
         score = local_topic_similarity(
             topic,
             old_topic
         )
 
         if score > best_score:
-
             best_score = score
             best_item = item
 
@@ -1062,7 +1020,7 @@ EDITOR_SYSTEM_PROMPT = """
 
 
 # ============================================================
-# TOPIC CHECK SCHEMA
+# SCHEMAS
 # ============================================================
 
 TOPIC_CHECK_SCHEMA = {
@@ -1091,10 +1049,6 @@ TOPIC_CHECK_SCHEMA = {
     ]
 }
 
-
-# ============================================================
-# POST SCHEMA
-# ============================================================
 
 POST_SCHEMA = {
     "type": "object",
@@ -1147,10 +1101,6 @@ POST_SCHEMA = {
     ]
 }
 
-
-# ============================================================
-# EDITOR SCHEMA
-# ============================================================
 
 EDITOR_SCHEMA = {
     "type": "object",
@@ -1227,32 +1177,21 @@ def extract_json(text):
     text = text.strip()
 
     try:
-        return json.loads(
-            text
-        )
+        return json.loads(text)
 
     except json.JSONDecodeError:
         pass
 
-    start = text.find(
-        "{"
-    )
-
-    end = text.rfind(
-        "}"
-    )
+    start = text.find("{")
+    end = text.rfind("}")
 
     if start == -1 or end == -1:
         return None
 
-    candidate = text[
-        start:end + 1
-    ]
+    candidate = text[start:end + 1]
 
     try:
-        return json.loads(
-            candidate
-        )
+        return json.loads(candidate)
 
     except json.JSONDecodeError:
         return None
@@ -1302,15 +1241,12 @@ def call_gemini(
         "generationConfig": {
             "temperature": 0.7,
             "maxOutputTokens": 3000,
-
             "responseMimeType": "application/json",
-
             "responseSchema": schema
         }
     }
 
     try:
-
         response = requests.post(
             url,
             headers=headers,
@@ -1318,8 +1254,15 @@ def call_gemini(
             timeout=60
         )
 
-    except requests.RequestException as e:
+    except requests.Timeout:
+        logging.warning(
+            "⚠️ Gemini timeout: %s",
+            model_name
+        )
 
+        return None
+
+    except requests.RequestException as e:
         logging.warning(
             "⚠️ Ошибка Gemini %s: %s",
             model_name,
@@ -1329,7 +1272,6 @@ def call_gemini(
         return None
 
     if response.status_code != 200:
-
         logging.warning(
             "⚠️ Gemini HTTP %s",
             response.status_code
@@ -1343,13 +1285,11 @@ def call_gemini(
         return None
 
     try:
-
         data = response.json()
 
     except json.JSONDecodeError:
-
         logging.warning(
-            "⚠️ Gemini вернул не JSON"
+            "⚠️ Gemini вернул некорректный JSON"
         )
 
         return None
@@ -1360,9 +1300,15 @@ def call_gemini(
     )
 
     if not candidates:
+        logging.warning(
+            "⚠️ Gemini не вернул candidates"
+        )
+
         return None
 
-    content = candidates[0].get(
+    candidate = candidates[0]
+
+    content = candidate.get(
         "content",
         {}
     )
@@ -1375,32 +1321,33 @@ def call_gemini(
     text_parts = []
 
     for part in parts:
-
-        if not isinstance(
-            part,
-            dict
-        ):
+        if not isinstance(part, dict):
             continue
 
-        text = part.get(
-            "text"
-        )
+        text = part.get("text")
 
         if text:
-            text_parts.append(
-                text
-            )
+            text_parts.append(text)
 
     raw_text = "".join(
         text_parts
     ).strip()
 
     if not raw_text:
+        logging.warning(
+            "⚠️ Gemini вернул пустой ответ"
+        )
+
         return None
 
-    return extract_json(
-        raw_text
-    )
+    result = extract_json(raw_text)
+
+    if result is None:
+        logging.warning(
+            "⚠️ Не удалось извлечь JSON из Gemini"
+        )
+
+    return result
 
 
 # ============================================================
@@ -1420,9 +1367,9 @@ def check_topic_with_gemini(
 
     history_lines = []
 
-    for item in history[
-        -MEMORY_DEPTH:
-    ]:
+    for item in history[-MEMORY_DEPTH:]:
+        if not isinstance(item, dict):
+            continue
 
         old_topic = (
             item.get("topic")
@@ -1504,10 +1451,7 @@ is_similar = true.
         TOPIC_CHECK_SCHEMA
     )
 
-    if not isinstance(
-        result,
-        dict
-    ):
+    if not isinstance(result, dict):
         return {
             "is_similar": False,
             "similarity_score": 0,
@@ -1578,7 +1522,6 @@ def is_topic_repeated(
     )
 
     if local_score >= SIMILARITY_THRESHOLD:
-
         old_topic = (
             local_item.get("topic")
             or local_item.get("title")
@@ -1594,7 +1537,7 @@ def is_topic_repeated(
         return True
 
     # --------------------------------------------------------
-    # 2. Проверка Gemini
+    # 2. Gemini
     # --------------------------------------------------------
 
     gemini_check = check_topic_with_gemini(
@@ -1610,14 +1553,12 @@ def is_topic_repeated(
         gemini_check["is_similar"]
         or score >= SIMILARITY_THRESHOLD
     ):
-
         logging.warning(
             "⚠️ Gemini нашёл похожую тему: %.0f%%",
             score * 100
         )
 
         if gemini_check["reason"]:
-
             logging.warning(
                 "Причина: %s",
                 gemini_check["reason"]
@@ -1643,9 +1584,9 @@ def build_generation_prompt(
 ):
     history_lines = []
 
-    for item in history[
-        -MEMORY_DEPTH:
-    ]:
+    for item in history[-MEMORY_DEPTH:]:
+        if not isinstance(item, dict):
+            continue
 
         topic = (
             item.get("topic")
@@ -1659,7 +1600,6 @@ def build_generation_prompt(
         )
 
         if topic:
-
             history_lines.append(
                 f"- Тема: {protect_prompt_data(topic)}\n"
                 f"  Кратко: {protect_prompt_data(summary)}"
@@ -1744,10 +1684,7 @@ END DATA
 # ============================================================
 
 def sanitize_post(result):
-    if not isinstance(
-        result,
-        dict
-    ):
+    if not isinstance(result, dict):
         return None
 
     fields = [
@@ -1762,28 +1699,17 @@ def sanitize_post(result):
     cleaned = {}
 
     for field in fields:
-
         value = result.get(
             field,
             ""
         )
 
-        if not isinstance(
-            value,
-            str
-        ):
-            value = str(
-                value or ""
-            )
+        if not isinstance(value, str):
+            value = str(value or "")
 
-        value = clean_ai_text(
-            value
-        )
+        value = clean_ai_text(value)
 
-        if contains_prompt_injection(
-            value
-        ):
-
+        if contains_prompt_injection(value):
             logging.warning(
                 "⚠️ Prompt injection в поле %s",
                 field
@@ -1793,7 +1719,7 @@ def sanitize_post(result):
 
         cleaned[field] = value
 
-    # Форматирование списков
+    # Форматирование списков.
     cleaned["hook"] = format_numbered_paragraphs(
         cleaned["hook"]
     )
@@ -1806,7 +1732,7 @@ def sanitize_post(result):
         cleaned["cta"]
     )
 
-    # Хэштеги
+    # Хэштеги.
     hashtags = sanitize_hashtags(
         result.get(
             "hashtags",
@@ -1826,7 +1752,7 @@ def sanitize_post(result):
         combined_text
     )
 
-    # Ограничения
+    # Ограничения.
     cleaned["title"] = shorten_text(
         cleaned["title"],
         MAX_TITLE_LENGTH
@@ -1875,21 +1801,15 @@ def sanitize_post(result):
 # ============================================================
 
 def sanitize_editor_result(result):
-    if not isinstance(
-        result,
-        dict
-    ):
+    if not isinstance(result, dict):
         return None
 
-    cleaned = sanitize_post(
-        result
-    )
+    cleaned = sanitize_post(result)
 
     if cleaned is None:
         return None
 
     try:
-
         score = float(
             result.get(
                 "quality_score",
@@ -1901,7 +1821,6 @@ def sanitize_editor_result(result):
         TypeError,
         ValueError
     ):
-
         score = 0
 
     score = max(
@@ -1921,9 +1840,7 @@ def sanitize_editor_result(result):
         )
     )
 
-    if contains_prompt_injection(
-        comment
-    ):
+    if contains_prompt_injection(comment):
         comment = ""
 
     cleaned["editor_comment"] = comment
@@ -1987,8 +1904,67 @@ END DATA
 
 Не добавляй неподтверждённые факты.
 
+Оцени качество итогового текста от 1 до 10.
+
+Если пост слабый, поставь оценку ниже 7.
+
 Верни только JSON.
 """
+
+
+# ============================================================
+# FINAL POST CHECK
+# ============================================================
+
+def final_post_similarity_check(
+    topic,
+    post,
+    history
+):
+    """
+    Проверяем не только заголовок,
+    а итоговый смысл поста.
+
+    Локальная проверка используется как быстрый
+    дополнительный фильтр.
+    """
+
+    if not history:
+        return False
+
+    combined = " ".join([
+        topic,
+        post.get("title", ""),
+        post.get("body", ""),
+    ])
+
+    score, item = get_topic_similarity_local(
+        combined,
+        history
+    )
+
+    # Для combined-текста локальный score может быть
+    # слишком агрессивным, поэтому используем более
+    # высокий порог.
+    final_threshold = 0.88
+
+    if score >= final_threshold:
+        old_topic = (
+            item.get("topic")
+            or item.get("title")
+            or "неизвестная тема"
+        )
+
+        logging.warning(
+            "⚠️ Финальная проверка нашла сильное сходство: "
+            "%.0f%% — %s",
+            score * 100,
+            old_topic
+        )
+
+        return True
+
+    return False
 
 
 # ============================================================
@@ -2012,7 +1988,7 @@ def generate_post():
     )
 
     # --------------------------------------------------------
-    # Пытаемся получить уникальную тему
+    # Выбор уникальной темы
     # --------------------------------------------------------
 
     selected_topic = None
@@ -2021,17 +1997,10 @@ def generate_post():
         1,
         MAX_TOPIC_ATTEMPTS + 1
     ):
-
         if attempt == 1:
-
-            candidate_topic = (
-                base_theme
-            )
+            candidate_topic = base_theme
 
         else:
-
-            # Просим Gemini придумать
-            # альтернативную тему.
             alternative_prompt = f"""
 Придумай НОВУЮ тему для Telegram-поста
 о лидерстве и управлении.
@@ -2051,6 +2020,7 @@ BEGIN DATA
                 or ""
             )
             for item in recent_history[-30:]
+            if isinstance(item, dict)
         )
     )
 }
@@ -2090,23 +2060,19 @@ END DATA
                     alternative_result,
                     dict
                 )
-                or not alternative_result.get(
-                    "topic"
-                )
+                or not alternative_result.get("topic")
             ):
-
                 candidate_topic = random.choice(
                     THEMES[
-                        datetime.now().weekday()
+                        datetime.now(
+                            timezone.utc
+                        ).weekday()
                     ]
                 )
 
             else:
-
                 candidate_topic = clean_ai_text(
-                    alternative_result[
-                        "topic"
-                    ]
+                    alternative_result["topic"]
                 )
 
         logging.info(
@@ -2116,9 +2082,15 @@ END DATA
             candidate_topic
         )
 
+        if not candidate_topic:
+            continue
+
         if contains_prompt_injection(
             candidate_topic
         ):
+            logging.warning(
+                "⚠️ Подозрительная тема."
+            )
             continue
 
         repeated = is_topic_repeated(
@@ -2127,10 +2099,7 @@ END DATA
         )
 
         if not repeated:
-
-            selected_topic = (
-                candidate_topic
-            )
+            selected_topic = candidate_topic
 
             logging.info(
                 "✅ Выбрана уникальная тема: %s",
@@ -2140,13 +2109,13 @@ END DATA
             break
 
         logging.warning(
-            "🔄 Тема повторяется — ищем другую"
+            "🔄 Тема повторяется — ищем другую."
         )
 
     if selected_topic is None:
-
         logging.error(
-            "❌ Не удалось подобрать новую тему после %s попыток",
+            "❌ Не удалось подобрать новую тему "
+            "после %s попыток.",
             MAX_TOPIC_ATTEMPTS
         )
 
@@ -2164,7 +2133,6 @@ END DATA
     )
 
     for model in GEMINI_MODELS:
-
         logging.info(
             "🤖 Gemini: %s",
             model
@@ -2180,48 +2148,39 @@ END DATA
         if result is None:
             continue
 
-        result = sanitize_post(
-            result
-        )
+        result = sanitize_post(result)
 
         if result is None:
+            logging.warning(
+                "⚠️ Сгенерированный пост не прошёл sanitization."
+            )
             continue
 
         generated = result
-
         break
 
     if generated is None:
-
         logging.error(
-            "❌ Не удалось создать пост"
+            "❌ Не удалось создать пост."
         )
 
         return None
 
     # --------------------------------------------------------
-    # Проверяем уже готовый пост
+    # Проверяем заголовок
     # --------------------------------------------------------
 
-    final_topic = (
-        selected_topic
-    )
-
-    # Заголовок тоже проверяем.
-    # Иногда Gemini может сильно изменить тему.
     title_repeated = is_topic_repeated(
         generated["title"],
         recent_history
     )
 
     if title_repeated:
-
         logging.warning(
-            "⚠️ Готовый заголовок оказался похож на старый"
+            "⚠️ Готовый заголовок оказался похож "
+            "на старую публикацию."
         )
 
-        # Не публикуем сомнительный пост.
-        # Лучше начать генерацию заново.
         return None
 
     # --------------------------------------------------------
@@ -2235,7 +2194,6 @@ END DATA
     edited = None
 
     for model in GEMINI_MODELS:
-
         logging.info(
             "✍️ Редактор Gemini: %s",
             model
@@ -2256,6 +2214,11 @@ END DATA
         )
 
         if result is None:
+            logging.warning(
+                "⚠️ Результат редактора "
+                "не прошёл sanitization."
+            )
+
             continue
 
         edited = result
@@ -2267,37 +2230,64 @@ END DATA
 
         break
 
-    if edited is not None:
+    # --------------------------------------------------------
+    # Проверка качества
+    # --------------------------------------------------------
 
+    if edited is not None:
+        quality_score = edited["quality_score"]
+
+        if quality_score < QUALITY_THRESHOLD:
+            logging.error(
+                "❌ Пост отклонён редактором: %.1f/10. "
+                "Минимум: %s/10.",
+                quality_score,
+                QUALITY_THRESHOLD
+            )
+
+            return None
+
+        # Если Gemini вернул слишком мало хэштегов,
+        # оставляем хорошие хэштеги исходного поста.
         if len(
             edited.get(
                 "hashtags",
                 []
             )
         ) < MIN_HASHTAGS:
-
             edited["hashtags"] = generated[
                 "hashtags"
             ]
 
-        if not edited.get(
-            "image_query"
-        ):
+        if not edited.get("image_query"):
             edited["image_query"] = generated[
                 "image_query"
             ]
 
-        if not edited.get(
-            "rubric"
-        ):
+        if not edited.get("rubric"):
             edited["rubric"] = generated[
                 "rubric"
             ]
 
         generated = edited
 
+    else:
+        logging.warning(
+            "⚠️ Редактор Gemini недоступен."
+        )
+
+        # Важное решение:
+        # если редактор не ответил, публикуем исходный
+        # пост только после обычной sanitization.
+        generated = sanitize_post(
+            generated
+        )
+
+        if generated is None:
+            return None
+
     # --------------------------------------------------------
-    # Final
+    # Final sanitization
     # --------------------------------------------------------
 
     generated = sanitize_post(
@@ -2305,11 +2295,31 @@ END DATA
     )
 
     if generated is None:
+        logging.error(
+            "❌ Финальный пост не прошёл проверку."
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # Финальная проверка повторов
+    # --------------------------------------------------------
+
+    if final_post_similarity_check(
+        selected_topic,
+        generated,
+        recent_history
+    ):
+        logging.error(
+            "❌ Финальный пост слишком похож "
+            "на предыдущую публикацию."
+        )
+
         return None
 
     return {
         "post": generated,
-        "topic": final_topic
+        "topic": selected_topic
     }
 
 
@@ -2388,9 +2398,7 @@ def render_caption(post):
             )
         )
 
-    return "\n\n".join(
-        parts
-    )
+    return "\n\n".join(parts)
 
 
 # ============================================================
@@ -2398,9 +2406,7 @@ def render_caption(post):
 # ============================================================
 
 def build_telegram_text(post):
-    post = dict(
-        post
-    )
+    post = dict(post)
 
     post["title"] = shorten_text(
         post.get("title", ""),
@@ -2443,12 +2449,10 @@ def build_telegram_text(post):
         ])
     )
 
-    caption = render_caption(
-        post
-    )
+    caption = render_caption(post)
 
     # --------------------------------------------------------
-    # Сначала body
+    # Сначала сокращаем body
     # --------------------------------------------------------
 
     while (
@@ -2456,7 +2460,6 @@ def build_telegram_text(post):
         > MAX_TELEGRAM_CAPTION
         and len(post["body"]) > 100
     ):
-
         post["body"] = shorten_text(
             post["body"],
             max(
@@ -2469,9 +2472,7 @@ def build_telegram_text(post):
             post["body"]
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # Hook
@@ -2482,7 +2483,6 @@ def build_telegram_text(post):
         > MAX_TELEGRAM_CAPTION
         and len(post["hook"]) > 70
     ):
-
         post["hook"] = shorten_text(
             post["hook"],
             max(
@@ -2495,9 +2495,7 @@ def build_telegram_text(post):
             post["hook"]
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # CTA
@@ -2508,7 +2506,6 @@ def build_telegram_text(post):
         > MAX_TELEGRAM_CAPTION
         and len(post["cta"]) > 40
     ):
-
         post["cta"] = shorten_text(
             post["cta"],
             max(
@@ -2517,9 +2514,7 @@ def build_telegram_text(post):
             )
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # Title
@@ -2530,7 +2525,6 @@ def build_telegram_text(post):
         > MAX_TELEGRAM_CAPTION
         and len(post["title"]) > 35
     ):
-
         post["title"] = shorten_text(
             post["title"],
             max(
@@ -2539,9 +2533,7 @@ def build_telegram_text(post):
             )
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # Emergency
@@ -2550,19 +2542,19 @@ def build_telegram_text(post):
     if telegram_visible_length(
         caption
     ) > MAX_TELEGRAM_CAPTION:
+        logging.warning(
+            "⚠️ Caption всё ещё длинный — удаляем body."
+        )
 
         post["body"] = ""
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     final_length = telegram_visible_length(
         caption
     )
 
     if final_length > MAX_TELEGRAM_CAPTION:
-
         logging.error(
             "❌ Caption слишком длинный: %s",
             final_length
@@ -2591,13 +2583,9 @@ def generate_image(query):
             "business leadership management"
         )
 
-    query = clean_ai_text(
-        query
-    )
+    query = clean_ai_text(query)
 
-    if contains_prompt_injection(
-        query
-    ):
+    if contains_prompt_injection(query):
         query = (
             "business leadership management"
         )
@@ -2619,7 +2607,6 @@ def generate_image(query):
     }
 
     try:
-
         response = requests.get(
             url,
             params=params,
@@ -2627,8 +2614,14 @@ def generate_image(query):
             timeout=30
         )
 
-    except requests.RequestException as e:
+    except requests.Timeout:
+        logging.warning(
+            "⚠️ Unsplash timeout."
+        )
 
+        return None
+
+    except requests.RequestException as e:
         logging.warning(
             "⚠️ Ошибка Unsplash: %s",
             e
@@ -2637,19 +2630,25 @@ def generate_image(query):
         return None
 
     if response.status_code != 200:
-
         logging.warning(
             "⚠️ Unsplash HTTP %s",
             response.status_code
         )
 
+        logging.warning(
+            "%s",
+            response.text[:1000]
+        )
+
         return None
 
     try:
-
         data = response.json()
 
     except json.JSONDecodeError:
+        logging.warning(
+            "⚠️ Unsplash вернул некорректный JSON."
+        )
 
         return None
 
@@ -2659,16 +2658,13 @@ def generate_image(query):
     )
 
     if not results:
-
         logging.warning(
-            "⚠️ Unsplash ничего не нашёл"
+            "⚠️ Unsplash ничего не нашёл."
         )
 
         return None
 
-    photo = random.choice(
-        results
-    )
+    photo = random.choice(results)
 
     urls = photo.get(
         "urls",
@@ -2698,6 +2694,17 @@ def publish_photo(
     image_url,
     caption
 ):
+    """
+    Возвращает:
+
+    True    — Telegram подтвердил публикацию.
+    False   — Telegram точно сообщил об ошибке.
+    None    — результат неизвестен, например timeout.
+
+    None нельзя автоматически повторять через sendMessage,
+    иначе можно получить два одинаковых поста.
+    """
+
     url = telegram_api_url(
         "sendPhoto"
     )
@@ -2710,24 +2717,34 @@ def publish_photo(
     }
 
     try:
-
         response = requests.post(
             url,
             json=payload,
             timeout=60
         )
 
-    except requests.RequestException as e:
+    except requests.Timeout:
+        logging.error(
+            "❌ Telegram sendPhoto timeout."
+        )
 
         logging.error(
-            "❌ Telegram: %s",
+            "⚠️ Результат публикации неизвестен. "
+            "Автоматический повтор отключён, "
+            "чтобы не создать дубль."
+        )
+
+        return None
+
+    except requests.RequestException as e:
+        logging.error(
+            "❌ Telegram sendPhoto: %s",
             e
         )
 
         return False
 
     if response.status_code != 200:
-
         logging.error(
             "❌ Telegram HTTP %s",
             response.status_code
@@ -2741,17 +2758,16 @@ def publish_photo(
         return False
 
     try:
-
         data = response.json()
 
     except json.JSONDecodeError:
+        logging.error(
+            "❌ Telegram вернул некорректный JSON."
+        )
 
-        return False
+        return None
 
-    if not data.get(
-        "ok"
-    ):
-
+    if not data.get("ok"):
         logging.error(
             "❌ Telegram API error: %s",
             data
@@ -2760,7 +2776,7 @@ def publish_photo(
         return False
 
     logging.info(
-        "✅ Фото опубликовано"
+        "✅ Фото опубликовано."
     )
 
     return True
@@ -2779,24 +2795,28 @@ def publish_text(caption):
     }
 
     try:
-
         response = requests.post(
             url,
             json=payload,
             timeout=60
         )
 
-    except requests.RequestException as e:
-
+    except requests.Timeout:
         logging.error(
-            "❌ Telegram: %s",
+            "❌ Telegram sendMessage timeout."
+        )
+
+        return None
+
+    except requests.RequestException as e:
+        logging.error(
+            "❌ Telegram sendMessage: %s",
             e
         )
 
         return False
 
     if response.status_code != 200:
-
         logging.error(
             "❌ Telegram HTTP %s",
             response.status_code
@@ -2810,17 +2830,16 @@ def publish_text(caption):
         return False
 
     try:
-
         data = response.json()
 
     except json.JSONDecodeError:
+        logging.error(
+            "❌ Telegram вернул некорректный JSON."
+        )
 
-        return False
+        return None
 
-    if not data.get(
-        "ok"
-    ):
-
+    if not data.get("ok"):
         logging.error(
             "❌ Telegram API error: %s",
             data
@@ -2829,7 +2848,7 @@ def publish_text(caption):
         return False
 
     logging.info(
-        "✅ Текст опубликован"
+        "✅ Текст опубликован."
     )
 
     return True
@@ -2840,13 +2859,12 @@ def publish_text(caption):
 # ============================================================
 
 def main():
-
     logging.info("")
     logging.info(
         "=========================================="
     )
     logging.info(
-        "🚀 TELEGRAM AI EDITOR V4"
+        "🚀 TELEGRAM AI EDITOR V5"
     )
     logging.info(
         "=========================================="
@@ -2855,12 +2873,18 @@ def main():
     check_required_env()
 
     logging.info(
-        "🤖 Gemini: Gemini 3.6 Flash"
+        "🤖 Gemini: %s",
+        GEMINI_MODELS[0]
     )
 
     logging.info(
         "🧠 Анти-повтор: последние %s недель",
         ANTI_REPEAT_WEEKS
+    )
+
+    logging.info(
+        "⭐ Минимальное качество: %s/10",
+        QUALITY_THRESHOLD
     )
 
     # --------------------------------------------------------
@@ -2870,20 +2894,14 @@ def main():
     result = generate_post()
 
     if result is None:
-
         logging.error(
-            "❌ Пост не создан"
+            "❌ Пост не создан."
         )
 
         sys.exit(1)
 
-    post = result[
-        "post"
-    ]
-
-    topic = result[
-        "topic"
-    ]
+    post = result["post"]
+    topic = result["topic"]
 
     logging.info(
         "📝 Тема: %s",
@@ -2907,14 +2925,12 @@ def main():
         "image_query",
         "rubric",
     ]:
-
         if contains_prompt_injection(
             post.get(
                 field,
                 ""
             )
         ):
-
             logging.error(
                 "❌ Prompt injection: %s",
                 field
@@ -2927,13 +2943,11 @@ def main():
     # --------------------------------------------------------
 
     try:
-
         telegram_text = build_telegram_text(
             post
         )
 
     except Exception as e:
-
         logging.error(
             "❌ Ошибка Telegram текста: %s",
             e
@@ -2961,26 +2975,68 @@ def main():
     published = False
 
     if image_url:
-
-        published = publish_photo(
+        photo_result = publish_photo(
             image_url,
             telegram_text
         )
 
-    if not published:
+        # True = точно опубликовано.
+        if photo_result is True:
+            published = True
 
-        logging.warning(
-            "⚠️ Публикуем без изображения"
+        # False = Telegram точно отказал.
+        elif photo_result is False:
+            logging.warning(
+                "⚠️ Фото не опубликовано. "
+                "Пробуем текстовую публикацию."
+            )
+
+        # None = результат неизвестен.
+        else:
+            logging.error(
+                "❌ Результат публикации фото неизвестен."
+            )
+
+            logging.error(
+                "❌ Не отправляем второй пост, "
+                "чтобы избежать возможного дубля."
+            )
+
+            sys.exit(1)
+
+    # --------------------------------------------------------
+    # Text fallback
+    # --------------------------------------------------------
+
+    if not published:
+        logging.info(
+            "📝 Публикуем без изображения."
         )
 
-        published = publish_text(
+        text_result = publish_text(
             telegram_text
         )
 
-    if not published:
+        if text_result is True:
+            published = True
 
+        elif text_result is None:
+            logging.error(
+                "❌ Результат текстовой публикации неизвестен."
+            )
+
+            sys.exit(1)
+
+        else:
+            published = False
+
+    # --------------------------------------------------------
+    # Final publication check
+    # --------------------------------------------------------
+
+    if not published:
         logging.error(
-            "❌ Пост не опубликован"
+            "❌ Пост не опубликован."
         )
 
         sys.exit(1)
@@ -2989,17 +3045,32 @@ def main():
     # History
     # --------------------------------------------------------
 
-    save_history(
-        post,
-        topic
+    try:
+        save_history(
+            post,
+            topic
+        )
+
+    except Exception:
+        logging.error(
+            "❌ Пост опубликован, "
+            "но историю сохранить не удалось."
+        )
+
+        # Это важно:
+        # пост уже опубликован, поэтому нельзя считать,
+        # что весь workflow должен "откатить" публикацию.
+        #
+        # Однако workflow завершится с ошибкой,
+        # чтобы GitHub Actions явно показал проблему.
+        sys.exit(1)
+
+    logging.info(
+        "💾 Пост записан в историю."
     )
 
     logging.info(
-        "💾 Пост записан в историю"
-    )
-
-    logging.info(
-        "🎉 V4 успешно завершил работу"
+        "🎉 V5 успешно завершил работу."
     )
 
 
