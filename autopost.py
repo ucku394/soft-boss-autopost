@@ -25,12 +25,10 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 
-# Берём модель из GitHub Actions / .env.
-# Если переменная не задана — используем Gemini 3.6 Flash.
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
     "gemini-3.6-flash"
-)
+).strip()
 
 
 # ============================================================
@@ -51,21 +49,26 @@ HISTORY_FILE = "content_history.json"
 # Сколько недель защищаем от повторов
 ANTI_REPEAT_WEEKS = 8
 
+# Отдельно особенно строго защищаем последние сутки
+SAME_DAY_HOURS = 24
+
 # Сколько последних записей максимум храним
 MAX_HISTORY_RECORDS = 200
 
 # Сколько записей передаём Gemini
 MEMORY_DEPTH = 40
 
-# Максимум попыток подобрать новую тему.
-# ВАЖНО:
-# Теперь подбор альтернативных тем НЕ вызывает Gemini.
-# Это только локальный перебор тем дня.
+# Максимум тем дня, которые перебираем локально
 MAX_TOPIC_ATTEMPTS = 6
 
-# Если локальная проверка считает темы похожими на 75%+
-# считаем тему повтором.
+# Базовый порог похожести
 SIMILARITY_THRESHOLD = 0.75
+
+# Более мягкий порог для нескольких независимых сигналов
+CONTENT_SIMILARITY_THRESHOLD = 0.68
+
+# Очень похожая публикация за последние сутки
+SAME_DAY_SIMILARITY_THRESHOLD = 0.60
 
 # Telegram caption
 MAX_TELEGRAM_CAPTION = 1024
@@ -199,14 +202,12 @@ def clean_ai_text(value):
 
     value = str(value)
 
-    # zero-width
     value = re.sub(
         r"[\u200b-\u200f\u2060\ufeff]",
         "",
         value
     )
 
-    # code fences
     value = re.sub(
         r"```(?:text|markdown|html|json)?",
         "",
@@ -219,7 +220,6 @@ def clean_ai_text(value):
         ""
     )
 
-    # HTML
     value = re.sub(
         r"<[^>]+>",
         "",
@@ -269,7 +269,6 @@ def format_numbered_paragraphs(text):
     if not text:
         return ""
 
-    # "текст 1. пункт"
     text = re.sub(
         r"(?<!^)"
         r"(?<!\n)"
@@ -282,7 +281,6 @@ def format_numbered_paragraphs(text):
         text
     )
 
-    # "1) пункт"
     text = re.sub(
         r"(?<!^)"
         r"(?<!\n)"
@@ -295,7 +293,6 @@ def format_numbered_paragraphs(text):
         text
     )
 
-    # "1. пункт\n2. пункт"
     text = re.sub(
         r"\n([1-9]|1[0-9]|20)\.\s+",
         r"\n\n\1. ",
@@ -397,15 +394,12 @@ def normalize_hashtag(value):
     if not value:
         return ""
 
-    if contains_prompt_injection(
-        value
-    ):
+    if contains_prompt_injection(value):
         return ""
 
     if not value.startswith("#"):
         value = "#" + value
 
-    # Только # + буквы/цифры/_
     if not re.fullmatch(
         r"#[\w]+",
         value,
@@ -438,9 +432,7 @@ def sanitize_hashtags(values):
 
     for value in values:
 
-        hashtag = normalize_hashtag(
-            value
-        )
+        hashtag = normalize_hashtag(value)
 
         if not hashtag:
             continue
@@ -460,43 +452,29 @@ def sanitize_hashtags(values):
 
 
 def ensure_hashtags(values, text=""):
-    hashtags = sanitize_hashtags(
-        values
-    )
+    hashtags = sanitize_hashtags(values)
 
     text_lower = text.lower()
 
     additional = []
 
     if "делег" in text_lower:
-        additional.append(
-            "#делегирование"
-        )
+        additional.append("#делегирование")
 
     if "команд" in text_lower:
-        additional.append(
-            "#команда"
-        )
+        additional.append("#команда")
 
     if "лидер" in text_lower:
-        additional.append(
-            "#лидерство"
-        )
+        additional.append("#лидерство")
 
     if "решен" in text_lower:
-        additional.append(
-            "#решения"
-        )
+        additional.append("#решения")
 
     if "обратн" in text_lower:
-        additional.append(
-            "#обратнаясвязь"
-        )
+        additional.append("#обратнаясвязь")
 
     if "книг" in text_lower:
-        additional.append(
-            "#книги"
-        )
+        additional.append("#книги")
 
     additional.extend([
         "#управление",
@@ -511,18 +489,14 @@ def ensure_hashtags(values, text=""):
 
     for hashtag in additional:
 
-        hashtag = normalize_hashtag(
-            hashtag
-        )
+        hashtag = normalize_hashtag(hashtag)
 
         if not hashtag:
             continue
 
         if hashtag.casefold() not in existing:
 
-            hashtags.append(
-                hashtag
-            )
+            hashtags.append(hashtag)
 
             existing.add(
                 hashtag.casefold()
@@ -552,9 +526,7 @@ def telegram_visible_length(value):
         value
     )
 
-    plain = html.unescape(
-        plain
-    )
+    plain = html.unescape(plain)
 
     return len(
         plain.encode(
@@ -564,9 +536,7 @@ def telegram_visible_length(value):
 
 
 def shorten_text(value, max_length):
-    value = clean_ai_text(
-        value
-    )
+    value = clean_ai_text(value)
 
     if len(value) <= max_length:
         return value
@@ -593,9 +563,7 @@ def shorten_text(value, max_length):
 # ============================================================
 
 def load_history():
-    if not os.path.exists(
-        HISTORY_FILE
-    ):
+    if not os.path.exists(HISTORY_FILE):
         return []
 
     try:
@@ -606,14 +574,9 @@ def load_history():
             encoding="utf-8"
         ) as file:
 
-            data = json.load(
-                file
-            )
+            data = json.load(file)
 
-        if isinstance(
-            data,
-            list
-        ):
+        if isinstance(data, list):
             return data
 
     except Exception as e:
@@ -627,8 +590,25 @@ def load_history():
 
 
 def parse_history_date(item):
+    """
+    V6:
+    Поддерживаем ВСЕ варианты дат,
+    которые уже встречаются в старых history:
+
+    - published_at
+    - created_at
+    - date
+    - datetime
+
+    Раньше created_at игнорировался.
+    """
+
+    if not isinstance(item, dict):
+        return None
+
     value = (
         item.get("published_at")
+        or item.get("created_at")
         or item.get("date")
         or item.get("datetime")
         or ""
@@ -639,16 +619,30 @@ def parse_history_date(item):
 
     try:
 
-        return datetime.fromisoformat(
-            value.replace(
+        parsed = datetime.fromisoformat(
+            str(value).replace(
                 "Z",
                 "+00:00"
             )
-        ).replace(
-            tzinfo=None
         )
 
-    except Exception:
+        # Переводим timezone-aware дату
+        # в naive datetime для единообразного сравнения.
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(
+                tzinfo=None
+            )
+
+        return parsed
+
+    except Exception as e:
+
+        logging.debug(
+            "Не удалось распознать дату истории %r: %s",
+            value,
+            e
+        )
+
         return None
 
 
@@ -666,12 +660,10 @@ def get_recent_history():
 
     for item in history:
 
-        date = parse_history_date(
-            item
-        )
+        date = parse_history_date(item)
 
-        # Старые записи V3 без даты
-        # тоже учитываем.
+        # Старые записи без даты тоже сохраняем
+        # в анти-повторе.
         if date is None:
             recent.append(item)
             continue
@@ -680,6 +672,64 @@ def get_recent_history():
             recent.append(item)
 
     return recent
+
+
+def get_today_history(history):
+    """
+    Отдельная строгая выборка публикаций
+    за последние 24 часа.
+    """
+
+    cutoff = (
+        datetime.now()
+        - timedelta(
+            hours=SAME_DAY_HOURS
+        )
+    )
+
+    result = []
+
+    for item in history:
+
+        date = parse_history_date(item)
+
+        if date is None:
+            continue
+
+        if date >= cutoff:
+            result.append(item)
+
+    return result
+
+
+def history_item_text(item):
+    """
+    Собираем максимум информации из старой публикации.
+
+    Это важно, потому что старые записи могут содержать
+    только topic/title, а новые уже имеют summary.
+    """
+
+    if not isinstance(item, dict):
+        return ""
+
+    parts = []
+
+    for key in [
+        "topic",
+        "title",
+        "summary",
+        "rubric",
+    ]:
+
+        value = item.get(key)
+
+        if value:
+            parts.append(
+                str(value)
+            )
+
+    return " ".join(parts)
 
 
 def save_history(post, topic):
@@ -705,8 +755,6 @@ def save_history(post, topic):
             []
         ),
 
-        # Сохраняем небольшой фрагмент тела,
-        # чтобы Gemini видел не только название.
         "summary": shorten_text(
             post.get(
                 "body",
@@ -716,9 +764,7 @@ def save_history(post, topic):
         ),
     }
 
-    history.append(
-        record
-    )
+    history.append(record)
 
     history = history[
         -MAX_HISTORY_RECORDS:
@@ -759,15 +805,11 @@ def get_today_theme():
         THEMES[0]
     )
 
-    return random.choice(
-        themes
-    )
+    return random.choice(themes)
 
 
 def protect_prompt_data(value):
-    value = str(
-        value or ""
-    )
+    value = str(value or "")
 
     value = value.replace(
         "<<<",
@@ -814,13 +856,43 @@ RUSSIAN_STOPWORDS = {
     "почему",
     "когда",
     "руководитель",
+    "руководителя",
+    "руководителю",
+    "руководители",
+    "руководителей",
+    "руководством",
+    "сотрудник",
+    "сотрудника",
+    "сотруднику",
+    "сотрудники",
+    "сотрудников",
+    "работа",
+    "работы",
+    "работать",
+    "рабочий",
+    "рабочего",
+    "рабочее",
+    "рабочая",
+    "можно",
+    "нужно",
+    "важно",
+    "стоит",
+    "свой",
+    "свои",
+    "своего",
+    "того",
+    "этот",
+    "эта",
+    "эти",
+    "так",
+    "уже",
+    "более",
+    "менее",
 }
 
 
 def normalize_topic_words(text):
-    text = str(
-        text or ""
-    ).lower()
+    text = str(text or "").lower()
 
     text = text.replace(
         "ё",
@@ -844,16 +916,105 @@ def normalize_topic_words(text):
     return set(words)
 
 
+def normalize_similarity_text(text):
+    """
+    Нормализация для сравнения содержания.
+
+    Убираем пунктуацию и служебные слова,
+    оставляя смысловые слова.
+    """
+
+    text = str(text or "").lower()
+
+    text = text.replace(
+        "ё",
+        "е"
+    )
+
+    text = re.sub(
+        r"https?://\S+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"#[а-яa-z0-9_]+",
+        " ",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"[^а-яa-z0-9\s]",
+        " ",
+        text
+    )
+
+    words = re.findall(
+        r"[а-яa-z0-9]+",
+        text
+    )
+
+    words = [
+        word
+        for word in words
+        if (
+            len(word) >= 3
+            and word not in RUSSIAN_STOPWORDS
+        )
+    ]
+
+    return " ".join(words)
+
+
+def make_word_ngrams(text, n=2):
+    words = normalize_similarity_text(
+        text
+    ).split()
+
+    if len(words) < n:
+        return set(words)
+
+    return {
+        " ".join(words[i:i + n])
+        for i in range(
+            len(words) - n + 1
+        )
+    }
+
+
+def jaccard_similarity(set_a, set_b):
+    if not set_a or not set_b:
+        return 0.0
+
+    intersection = (
+        set_a & set_b
+    )
+
+    union = (
+        set_a | set_b
+    )
+
+    if not union:
+        return 0.0
+
+    return (
+        len(intersection)
+        / len(union)
+    )
+
+
 def local_topic_similarity(
     new_topic,
     old_topic
 ):
     """
-    Быстрая локальная проверка.
+    Сравнение коротких тем.
 
-    Используем два метода:
-    1. сходство текста;
-    2. сходство ключевых слов.
+    Используем:
+    - SequenceMatcher;
+    - пересечение ключевых слов;
+    - более устойчивое сравнение слов.
     """
 
     new_topic = str(
@@ -888,32 +1049,120 @@ def local_topic_similarity(
         old_topic
     )
 
-    if new_words or old_words:
+    keyword_score = jaccard_similarity(
+        new_words,
+        old_words
+    )
 
-        intersection = (
-            new_words
-            & old_words
-        )
+    new_ngrams = make_word_ngrams(
+        new_topic,
+        2
+    )
 
-        union = (
-            new_words
-            | old_words
-        )
+    old_ngrams = make_word_ngrams(
+        old_topic,
+        2
+    )
 
-        keyword_score = (
-            len(intersection)
-            / len(union)
-            if union
-            else 0
-        )
+    ngram_score = jaccard_similarity(
+        new_ngrams,
+        old_ngrams
+    )
 
-    else:
-        keyword_score = 0
-
-    # Берём наиболее сильный сигнал
     return max(
         sequence_score,
-        keyword_score
+        keyword_score,
+        ngram_score
+    )
+
+
+def content_similarity(
+    new_text,
+    old_text
+):
+    """
+    Более строгая локальная проверка
+    всего содержания.
+
+    Это уже не просто topic-vs-topic.
+
+    Сравниваем:
+    1. нормализованный текст;
+    2. ключевые слова;
+    3. биграммы;
+    4. SequenceMatcher.
+
+    В итоге одинаковые идеи в разных формулировках
+    чаще будут отсеиваться.
+    """
+
+    new_text = str(
+        new_text or ""
+    )
+
+    old_text = str(
+        old_text or ""
+    )
+
+    if not new_text or not old_text:
+        return 0.0
+
+    new_normalized = normalize_similarity_text(
+        new_text
+    )
+
+    old_normalized = normalize_similarity_text(
+        old_text
+    )
+
+    if not new_normalized or not old_normalized:
+        return 0.0
+
+    sequence_score = SequenceMatcher(
+        None,
+        new_normalized,
+        old_normalized
+    ).ratio()
+
+    new_words = set(
+        new_normalized.split()
+    )
+
+    old_words = set(
+        old_normalized.split()
+    )
+
+    word_score = jaccard_similarity(
+        new_words,
+        old_words
+    )
+
+    new_bigrams = make_word_ngrams(
+        new_text,
+        2
+    )
+
+    old_bigrams = make_word_ngrams(
+        old_text,
+        2
+    )
+
+    bigram_score = jaccard_similarity(
+        new_bigrams,
+        old_bigrams
+    )
+
+    # Для контента наиболее полезны
+    # ключевые слова + фразы.
+    combined_score = (
+        word_score * 0.45
+        + bigram_score * 0.35
+        + sequence_score * 0.20
+    )
+
+    return max(
+        combined_score,
+        sequence_score
     )
 
 
@@ -948,22 +1197,257 @@ def get_topic_similarity_local(
     )
 
 
+def get_content_similarity_local(
+    text,
+    history
+):
+    """
+    Возвращает самое похожее старое содержание.
+    """
+
+    best_score = 0
+    best_item = None
+
+    for item in history:
+
+        old_text = history_item_text(
+            item
+        )
+
+        if not old_text:
+            continue
+
+        score = content_similarity(
+            text,
+            old_text
+        )
+
+        if score > best_score:
+
+            best_score = score
+            best_item = item
+
+    return (
+        best_score,
+        best_item
+    )
+
+
+# ============================================================
+# SAME DAY DUPLICATE CHECK
+# ============================================================
+
+def check_same_day_duplicate(
+    new_post,
+    history
+):
+    """
+    Особо строгая защита последних 24 часов.
+
+    Важно:
+    утром мог быть пост с created_at,
+    а новый — с published_at.
+
+    parse_history_date() теперь учитывает оба.
+    """
+
+    today_history = get_today_history(
+        history
+    )
+
+    if not today_history:
+        logging.info(
+            "📅 За последние %s часов публикаций не найдено",
+            SAME_DAY_HOURS
+        )
+
+        return False
+
+    new_text = " ".join([
+        new_post.get("title", ""),
+        new_post.get("hook", ""),
+        new_post.get("body", ""),
+        new_post.get("cta", ""),
+    ])
+
+    best_score = 0
+    best_item = None
+
+    for item in today_history:
+
+        old_text = history_item_text(
+            item
+        )
+
+        if not old_text:
+            continue
+
+        score = content_similarity(
+            new_text,
+            old_text
+        )
+
+        if score > best_score:
+
+            best_score = score
+            best_item = item
+
+    if best_item is None:
+        return False
+
+    old_title = (
+        best_item.get("title")
+        or best_item.get("topic")
+        or "неизвестный пост"
+    )
+
+    old_topic = (
+        best_item.get("topic")
+        or ""
+    )
+
+    # Если очень похож весь материал.
+    if best_score >= SAME_DAY_SIMILARITY_THRESHOLD:
+
+        logging.error(
+            "🚫 ПОСТ ПОХОЖ НА ПУБЛИКАЦИЮ ЗА ПОСЛЕДНИЕ %s ЧАСОВ: %.0f%%",
+            SAME_DAY_HOURS,
+            best_score * 100
+        )
+
+        logging.error(
+            "   Старый заголовок: %s",
+            old_title
+        )
+
+        if old_topic:
+            logging.error(
+                "   Старая тема: %s",
+                old_topic
+            )
+
+        return True
+
+    logging.info(
+        "📅 Максимальное сходство с постом за последние сутки: %.0f%%",
+        best_score * 100
+    )
+
+    return False
+
+
+# ============================================================
+# HISTORY CONTENT CHECK
+# ============================================================
+
+def check_post_against_history(
+    post,
+    history
+):
+    """
+    Финальная локальная проверка готового поста
+    против всей истории.
+
+    Проверяем отдельно:
+    - title;
+    - topic/title;
+    - полный текст.
+    """
+
+    if not history:
+        return False
+
+    new_title = post.get(
+        "title",
+        ""
+    )
+
+    new_full_text = " ".join([
+        post.get("title", ""),
+        post.get("hook", ""),
+        post.get("body", ""),
+        post.get("cta", ""),
+    ])
+
+    # --------------------------------------------------------
+    # Заголовок
+    # --------------------------------------------------------
+
+    title_score, title_item = (
+        get_topic_similarity_local(
+            new_title,
+            history
+        )
+    )
+
+    if title_score >= SIMILARITY_THRESHOLD:
+
+        old_title = (
+            title_item.get("title")
+            or title_item.get("topic")
+            or "неизвестный пост"
+        ) if title_item else "неизвестный пост"
+
+        logging.error(
+            "🚫 Новый заголовок похож на старый: %.0f%% — %s",
+            title_score * 100,
+            old_title
+        )
+
+        return True
+
+    # --------------------------------------------------------
+    # Полное содержание
+    # --------------------------------------------------------
+
+    content_score, content_item = (
+        get_content_similarity_local(
+            new_full_text,
+            history
+        )
+    )
+
+    if content_item:
+
+        old_title = (
+            content_item.get("title")
+            or content_item.get("topic")
+            or "неизвестный пост"
+        )
+
+        # Для старой истории с короткими данными
+        # используем немного более высокий порог.
+        if content_score >= CONTENT_SIMILARITY_THRESHOLD:
+
+            logging.error(
+                "🚫 Содержание нового поста похоже на старый пост: %.0f%% — %s",
+                content_score * 100,
+                old_title
+            )
+
+            return True
+
+        logging.info(
+            "🧠 Максимальное локальное сходство содержания: %.0f%% — %s",
+            content_score * 100,
+            old_title
+        )
+
+    return False
+
+
 # ============================================================
 # TOPIC SELECTION — LOCAL ONLY
 # ============================================================
 
 def select_unique_topic(history):
     """
-    Выбирает тему без единого запроса к Gemini.
+    Подбор темы полностью локально.
 
-    Это ключевое изменение V4:
+    Gemini здесь не вызывается.
 
-    - сначала случайная тема дня;
-    - если она повторялась — перебираем остальные темы;
-    - Gemini здесь вообще не вызывается.
-
-    Благодаря этому анти-повтор больше не расходует
-    Gemini quota.
+    Сначала случайная тема дня,
+    затем остальные темы дня.
     """
 
     weekday = datetime.now().weekday()
@@ -978,11 +1462,7 @@ def select_unique_topic(history):
     if not themes:
         return None
 
-    # Случайно перемешиваем темы,
-    # чтобы не публиковать их всегда в одном порядке.
-    random.shuffle(
-        themes
-    )
+    random.shuffle(themes)
 
     logging.info(
         "🗂️ Тем дня доступно: %s",
@@ -994,6 +1474,9 @@ def select_unique_topic(history):
     for candidate_topic in themes:
 
         checked += 1
+
+        if checked > MAX_TOPIC_ATTEMPTS:
+            break
 
         logging.info(
             "🔎 Локальная проверка темы %s/%s: %s",
@@ -1192,11 +1675,9 @@ POST_SCHEMA = {
 
         "hashtags": {
             "type": "array",
-
             "items": {
                 "type": "string"
             },
-
             "minItems": 2,
             "maxItems": 3
         },
@@ -1248,11 +1729,9 @@ EDITOR_SCHEMA = {
 
         "hashtags": {
             "type": "array",
-
             "items": {
                 "type": "string"
             },
-
             "minItems": 2,
             "maxItems": 3
         },
@@ -1301,20 +1780,13 @@ def extract_json(text):
     text = text.strip()
 
     try:
-        return json.loads(
-            text
-        )
+        return json.loads(text)
 
     except json.JSONDecodeError:
         pass
 
-    start = text.find(
-        "{"
-    )
-
-    end = text.rfind(
-        "}"
-    )
+    start = text.find("{")
+    end = text.rfind("}")
 
     if start == -1 or end == -1:
         return None
@@ -1324,9 +1796,7 @@ def extract_json(text):
     ]
 
     try:
-        return json.loads(
-            candidate
-        )
+        return json.loads(candidate)
 
     except json.JSONDecodeError:
         return None
@@ -1364,7 +1834,6 @@ def call_gemini(
         "contents": [
             {
                 "role": "user",
-
                 "parts": [
                     {
                         "text": prompt
@@ -1376,9 +1845,7 @@ def call_gemini(
         "generationConfig": {
             "temperature": 0.7,
             "maxOutputTokens": 3000,
-
             "responseMimeType": "application/json",
-
             "responseSchema": schema
         }
     }
@@ -1402,10 +1869,6 @@ def call_gemini(
 
         return None
 
-    # --------------------------------------------------------
-    # QUOTA / RATE LIMIT
-    # --------------------------------------------------------
-
     if response.status_code == 429:
 
         logging.error(
@@ -1423,7 +1886,7 @@ def call_gemini(
 
         except Exception:
 
-            error_text = response.text[:1500]
+            error_text = response.text[:3000]
 
         logging.error(
             "%s",
@@ -1435,8 +1898,7 @@ def call_gemini(
         )
 
         logging.error(
-            "💡 Код не будет повторять запросы, "
-            "чтобы дополнительно не расходовать quota."
+            "💡 Запрос повторно автоматически не отправляем."
         )
 
         return None
@@ -1500,9 +1962,7 @@ def call_gemini(
         )
 
         if text:
-            text_parts.append(
-                text
-            )
+            text_parts.append(text)
 
     raw_text = "".join(
         text_parts
@@ -1545,6 +2005,7 @@ def build_generation_prompt(
 
             history_lines.append(
                 f"- Тема: {protect_prompt_data(topic)}\n"
+                f"  Заголовок: {protect_prompt_data(item.get('title', ''))}\n"
                 f"  Кратко: {protect_prompt_data(summary)}"
             )
 
@@ -1577,10 +2038,18 @@ END DATA
 Не делай новый пост просто перефразировкой
 старого поста.
 
-Если старая тема была про отдых после работы,
-не делай новую тему снова про отключение от работы.
+Особенно внимательно проверь последние публикации.
 
-Найди другой практический угол.
+Если недавно уже был материал про созвоны,
+коммуникации, встречи или сокращение количества
+созвонов — не создавай ещё один пост на ту же
+идею под другим названием.
+
+Если недавно был пост про делегирование,
+не делай ещё один пост с тем же практическим
+советом под другой формулировкой.
+
+Нужен другой управленческий угол.
 
 Требования:
 
@@ -1659,13 +2128,9 @@ def sanitize_post(result):
                 value or ""
             )
 
-        value = clean_ai_text(
-            value
-        )
+        value = clean_ai_text(value)
 
-        if contains_prompt_injection(
-            value
-        ):
+        if contains_prompt_injection(value):
 
             logging.warning(
                 "⚠️ Prompt injection в поле %s",
@@ -1676,7 +2141,6 @@ def sanitize_post(result):
 
         cleaned[field] = value
 
-    # Форматирование списков
     cleaned["hook"] = format_numbered_paragraphs(
         cleaned["hook"]
     )
@@ -1689,7 +2153,6 @@ def sanitize_post(result):
         cleaned["cta"]
     )
 
-    # Хэштеги
     hashtags = sanitize_hashtags(
         result.get(
             "hashtags",
@@ -1709,7 +2172,6 @@ def sanitize_post(result):
         combined_text
     )
 
-    # Ограничения
     cleaned["title"] = shorten_text(
         cleaned["title"],
         MAX_TITLE_LENGTH
@@ -1764,9 +2226,7 @@ def sanitize_editor_result(result):
     ):
         return None
 
-    cleaned = sanitize_post(
-        result
-    )
+    cleaned = sanitize_post(result)
 
     if cleaned is None:
         return None
@@ -1804,9 +2264,7 @@ def sanitize_editor_result(result):
         )
     )
 
-    if contains_prompt_injection(
-        comment
-    ):
+    if contains_prompt_injection(comment):
         comment = ""
 
     cleaned["editor_comment"] = comment
@@ -1870,6 +2328,8 @@ END DATA
 
 Не добавляй неподтверждённые факты.
 
+Не меняй основную тему поста на другую тему.
+
 Верни только JSON.
 """
 
@@ -1895,7 +2355,7 @@ def generate_post():
     )
 
     # --------------------------------------------------------
-    # Выбор уникальной темы — ТОЛЬКО ЛОКАЛЬНО
+    # Выбор уникальной темы
     # --------------------------------------------------------
 
     selected_topic = select_unique_topic(
@@ -1916,9 +2376,7 @@ def generate_post():
     )
 
     # --------------------------------------------------------
-    # Генерируем пост
-    #
-    # Теперь это ПЕРВЫЙ запрос Gemini за запуск.
+    # Генерация
     # --------------------------------------------------------
 
     generated = None
@@ -1965,53 +2423,41 @@ def generate_post():
         return None
 
     # --------------------------------------------------------
-    # Проверяем уже готовый заголовок
-    #
-    # ВАЖНО:
-    # НЕ вызываем Gemini.
-    # Используем только локальную проверку.
+    # Проверка готового поста ДО редактора
     # --------------------------------------------------------
 
-    title_score, title_item = (
-        get_topic_similarity_local(
-            generated["title"],
-            recent_history
-        )
+    logging.info(
+        "🔍 Проверяем сгенерированный пост на повторы"
     )
 
-    if title_score >= SIMILARITY_THRESHOLD:
-
-        old_title = "неизвестная тема"
-
-        if title_item:
-
-            old_title = (
-                title_item.get("topic")
-                or title_item.get("title")
-                or old_title
-            )
-
-        logging.warning(
-            "⚠️ Готовый заголовок локально похож на старый: %.0f%% — %s",
-            title_score * 100,
-            old_title
-        )
+    if check_same_day_duplicate(
+        generated,
+        recent_history
+    ):
 
         logging.error(
-            "❌ Пост не публикуем из-за риска повтора"
+            "❌ Новый пост отклонён: похож на публикацию последних суток"
+        )
+
+        return None
+
+    if check_post_against_history(
+        generated,
+        recent_history
+    ):
+
+        logging.error(
+            "❌ Новый пост отклонён: найден риск повтора"
         )
 
         return None
 
     logging.info(
-        "✅ Заголовок локально достаточно новый: %.0f%%",
-        title_score * 100
+        "✅ Сгенерированный пост прошёл анти-повтор"
     )
 
     # --------------------------------------------------------
     # EDITOR
-    #
-    # Это ВТОРОЙ запрос Gemini за запуск.
     # --------------------------------------------------------
 
     edit_prompt = build_edit_prompt(
@@ -2069,6 +2515,7 @@ def generate_post():
         if not edited.get(
             "image_query"
         ):
+
             edited["image_query"] = generated[
                 "image_query"
             ]
@@ -2076,6 +2523,7 @@ def generate_post():
         if not edited.get(
             "rubric"
         ):
+
             edited["rubric"] = generated[
                 "rubric"
             ]
@@ -2083,7 +2531,10 @@ def generate_post():
         generated = edited
 
     # --------------------------------------------------------
-    # Final
+    # ВАЖНО:
+    # редактор мог изменить текст.
+    #
+    # Поэтому проверяем пост ЕЩЁ РАЗ после редактора.
     # --------------------------------------------------------
 
     generated = sanitize_post(
@@ -2092,6 +2543,36 @@ def generate_post():
 
     if generated is None:
         return None
+
+    logging.info(
+        "🔍 Финальная проверка поста после редактора"
+    )
+
+    if check_same_day_duplicate(
+        generated,
+        recent_history
+    ):
+
+        logging.error(
+            "❌ После редактора пост стал похож на публикацию последних суток"
+        )
+
+        return None
+
+    if check_post_against_history(
+        generated,
+        recent_history
+    ):
+
+        logging.error(
+            "❌ После редактора обнаружен риск повтора"
+        )
+
+        return None
+
+    logging.info(
+        "✅ Финальная проверка анти-повтора пройдена"
+    )
 
     return {
         "post": generated,
@@ -2174,9 +2655,7 @@ def render_caption(post):
             )
         )
 
-    return "\n\n".join(
-        parts
-    )
+    return "\n\n".join(parts)
 
 
 # ============================================================
@@ -2184,9 +2663,7 @@ def render_caption(post):
 # ============================================================
 
 def build_telegram_text(post):
-    post = dict(
-        post
-    )
+    post = dict(post)
 
     post["title"] = shorten_text(
         post.get("title", ""),
@@ -2229,12 +2706,10 @@ def build_telegram_text(post):
         ])
     )
 
-    caption = render_caption(
-        post
-    )
+    caption = render_caption(post)
 
     # --------------------------------------------------------
-    # Сначала body
+    # Body
     # --------------------------------------------------------
 
     while (
@@ -2255,9 +2730,7 @@ def build_telegram_text(post):
             post["body"]
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # Hook
@@ -2281,9 +2754,7 @@ def build_telegram_text(post):
             post["hook"]
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # CTA
@@ -2303,9 +2774,7 @@ def build_telegram_text(post):
             )
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # Title
@@ -2325,9 +2794,7 @@ def build_telegram_text(post):
             )
         )
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     # --------------------------------------------------------
     # Emergency
@@ -2339,9 +2806,7 @@ def build_telegram_text(post):
 
         post["body"] = ""
 
-        caption = render_caption(
-            post
-        )
+        caption = render_caption(post)
 
     final_length = telegram_visible_length(
         caption
@@ -2377,13 +2842,9 @@ def generate_image(query):
             "business leadership management"
         )
 
-    query = clean_ai_text(
-        query
-    )
+    query = clean_ai_text(query)
 
-    if contains_prompt_injection(
-        query
-    ):
+    if contains_prompt_injection(query):
         query = (
             "business leadership management"
         )
@@ -2452,9 +2913,7 @@ def generate_image(query):
 
         return None
 
-    photo = random.choice(
-        results
-    )
+    photo = random.choice(results)
 
     urls = photo.get(
         "urls",
@@ -2534,9 +2993,7 @@ def publish_photo(
 
         return False
 
-    if not data.get(
-        "ok"
-    ):
+    if not data.get("ok"):
 
         logging.error(
             "❌ Telegram API error: %s",
@@ -2603,9 +3060,7 @@ def publish_text(caption):
 
         return False
 
-    if not data.get(
-        "ok"
-    ):
+    if not data.get("ok"):
 
         logging.error(
             "❌ Telegram API error: %s",
@@ -2632,7 +3087,7 @@ def main():
         "=========================================="
     )
     logging.info(
-        "🚀 TELEGRAM AI EDITOR V5"
+        "🚀 TELEGRAM AI EDITOR V6"
     )
     logging.info(
         "=========================================="
@@ -2648,6 +3103,11 @@ def main():
     logging.info(
         "🧠 Анти-повтор: последние %s недель",
         ANTI_REPEAT_WEEKS
+    )
+
+    logging.info(
+        "📅 Строгая защита повторов: последние %s часов",
+        SAME_DAY_HOURS
     )
 
     logging.info(
@@ -2674,13 +3134,8 @@ def main():
 
         sys.exit(1)
 
-    post = result[
-        "post"
-    ]
-
-    topic = result[
-        "topic"
-    ]
+    post = result["post"]
+    topic = result["topic"]
 
     logging.info(
         "📝 Тема: %s",
@@ -2734,6 +3189,37 @@ def main():
         logging.error(
             "❌ Ошибка Telegram текста: %s",
             e
+        )
+
+        sys.exit(1)
+
+    # --------------------------------------------------------
+    # Финальная проверка именно готового
+    # Telegram-текста.
+    #
+    # Это последний барьер перед публикацией.
+    # --------------------------------------------------------
+
+    recent_history = get_recent_history()
+
+    telegram_plain_text = re.sub(
+        r"<[^>]+>",
+        " ",
+        telegram_text
+    )
+
+    if check_same_day_duplicate(
+        {
+            "title": post.get("title", ""),
+            "hook": post.get("hook", ""),
+            "body": post.get("body", ""),
+            "cta": post.get("cta", ""),
+        },
+        recent_history
+    ):
+
+        logging.error(
+            "🚫 Финальная защита остановила публикацию"
         )
 
         sys.exit(1)
@@ -2796,7 +3282,7 @@ def main():
     )
 
     logging.info(
-        "🎉 V5 успешно завершил работу"
+        "🎉 V6 успешно завершил работу"
     )
 
 
