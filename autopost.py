@@ -25,13 +25,20 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 
+# Берём модель из GitHub Actions / .env.
+# Если переменная не задана — используем Gemini 3.6 Flash.
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash"
+)
+
 
 # ============================================================
 # GEMINI
 # ============================================================
 
 GEMINI_MODELS = [
-    "gemini-3.6-flash"
+    GEMINI_MODEL
 ]
 
 
@@ -41,16 +48,26 @@ GEMINI_MODELS = [
 
 HISTORY_FILE = "content_history.json"
 
+# Сколько недель защищаем от повторов
 ANTI_REPEAT_WEEKS = 8
 
+# Сколько последних записей максимум храним
 MAX_HISTORY_RECORDS = 200
 
+# Сколько записей передаём Gemini
 MEMORY_DEPTH = 40
 
-MAX_TOPIC_ATTEMPTS = 5
+# Максимум попыток подобрать новую тему.
+# ВАЖНО:
+# Теперь подбор альтернативных тем НЕ вызывает Gemini.
+# Это только локальный перебор тем дня.
+MAX_TOPIC_ATTEMPTS = 6
 
+# Если локальная проверка считает темы похожими на 75%+
+# считаем тему повтором.
 SIMILARITY_THRESHOLD = 0.75
 
+# Telegram caption
 MAX_TELEGRAM_CAPTION = 1024
 
 MAX_TITLE_LENGTH = 90
@@ -182,12 +199,14 @@ def clean_ai_text(value):
 
     value = str(value)
 
+    # zero-width
     value = re.sub(
         r"[\u200b-\u200f\u2060\ufeff]",
         "",
         value
     )
 
+    # code fences
     value = re.sub(
         r"```(?:text|markdown|html|json)?",
         "",
@@ -200,6 +219,7 @@ def clean_ai_text(value):
         ""
     )
 
+    # HTML
     value = re.sub(
         r"<[^>]+>",
         "",
@@ -249,6 +269,7 @@ def format_numbered_paragraphs(text):
     if not text:
         return ""
 
+    # "текст 1. пункт"
     text = re.sub(
         r"(?<!^)"
         r"(?<!\n)"
@@ -261,6 +282,7 @@ def format_numbered_paragraphs(text):
         text
     )
 
+    # "1) пункт"
     text = re.sub(
         r"(?<!^)"
         r"(?<!\n)"
@@ -273,6 +295,7 @@ def format_numbered_paragraphs(text):
         text
     )
 
+    # "1. пункт\n2. пункт"
     text = re.sub(
         r"\n([1-9]|1[0-9]|20)\.\s+",
         r"\n\n\1. ",
@@ -374,12 +397,15 @@ def normalize_hashtag(value):
     if not value:
         return ""
 
-    if contains_prompt_injection(value):
+    if contains_prompt_injection(
+        value
+    ):
         return ""
 
     if not value.startswith("#"):
         value = "#" + value
 
+    # Только # + буквы/цифры/_
     if not re.fullmatch(
         r"#[\w]+",
         value,
@@ -644,6 +670,8 @@ def get_recent_history():
             item
         )
 
+        # Старые записи V3 без даты
+        # тоже учитываем.
         if date is None:
             recent.append(item)
             continue
@@ -677,6 +705,8 @@ def save_history(post, topic):
             []
         ),
 
+        # Сохраняем небольшой фрагмент тела,
+        # чтобы Gemini видел не только название.
         "summary": shorten_text(
             post.get(
                 "body",
@@ -731,17 +761,6 @@ def get_today_theme():
 
     return random.choice(
         themes
-    )
-
-
-def get_today_themes():
-    weekday = datetime.now().weekday()
-
-    return list(
-        THEMES.get(
-            weekday,
-            THEMES[0]
-        )
     )
 
 
@@ -829,6 +848,14 @@ def local_topic_similarity(
     new_topic,
     old_topic
 ):
+    """
+    Быстрая локальная проверка.
+
+    Используем два метода:
+    1. сходство текста;
+    2. сходство ключевых слов.
+    """
+
     new_topic = str(
         new_topic or ""
     ).lower()
@@ -883,6 +910,7 @@ def local_topic_similarity(
     else:
         keyword_score = 0
 
+    # Берём наиболее сильный сигнал
     return max(
         sequence_score,
         keyword_score
@@ -918,6 +946,102 @@ def get_topic_similarity_local(
         best_score,
         best_item
     )
+
+
+# ============================================================
+# TOPIC SELECTION — LOCAL ONLY
+# ============================================================
+
+def select_unique_topic(history):
+    """
+    Выбирает тему без единого запроса к Gemini.
+
+    Это ключевое изменение V4:
+
+    - сначала случайная тема дня;
+    - если она повторялась — перебираем остальные темы;
+    - Gemini здесь вообще не вызывается.
+
+    Благодаря этому анти-повтор больше не расходует
+    Gemini quota.
+    """
+
+    weekday = datetime.now().weekday()
+
+    themes = list(
+        THEMES.get(
+            weekday,
+            THEMES[0]
+        )
+    )
+
+    if not themes:
+        return None
+
+    # Случайно перемешиваем темы,
+    # чтобы не публиковать их всегда в одном порядке.
+    random.shuffle(
+        themes
+    )
+
+    logging.info(
+        "🗂️ Тем дня доступно: %s",
+        len(themes)
+    )
+
+    checked = 0
+
+    for candidate_topic in themes:
+
+        checked += 1
+
+        logging.info(
+            "🔎 Локальная проверка темы %s/%s: %s",
+            checked,
+            len(themes),
+            candidate_topic
+        )
+
+        if contains_prompt_injection(
+            candidate_topic
+        ):
+            continue
+
+        local_score, local_item = (
+            get_topic_similarity_local(
+                candidate_topic,
+                history
+            )
+        )
+
+        if local_score >= SIMILARITY_THRESHOLD:
+
+            old_topic = (
+                local_item.get("topic")
+                or local_item.get("title")
+                or "неизвестная тема"
+            )
+
+            logging.warning(
+                "⚠️ Тема повторяется локально: %.0f%% — %s",
+                local_score * 100,
+                old_topic
+            )
+
+            continue
+
+        logging.info(
+            "✅ Локально тема достаточно отличается: %.0f%%",
+            local_score * 100
+        )
+
+        return candidate_topic
+
+    logging.error(
+        "❌ Все темы текущего дня оказались похожи на историю"
+    )
+
+    return None
 
 
 # ============================================================
@@ -1278,6 +1402,45 @@ def call_gemini(
 
         return None
 
+    # --------------------------------------------------------
+    # QUOTA / RATE LIMIT
+    # --------------------------------------------------------
+
+    if response.status_code == 429:
+
+        logging.error(
+            "🚫 Gemini HTTP 429 — quota/rate limit."
+        )
+
+        try:
+
+            error_data = response.json()
+
+            error_text = json.dumps(
+                error_data,
+                ensure_ascii=False
+            )
+
+        except Exception:
+
+            error_text = response.text[:1500]
+
+        logging.error(
+            "%s",
+            error_text[:3000]
+        )
+
+        logging.error(
+            "❌ Gemini недоступен из-за квоты."
+        )
+
+        logging.error(
+            "💡 Код не будет повторять запросы, "
+            "чтобы дополнительно не расходовать quota."
+        )
+
+        return None
+
     if response.status_code != 200:
 
         logging.warning(
@@ -1289,13 +1452,6 @@ def call_gemini(
             "%s",
             response.text[:1500]
         )
-
-        if response.status_code == 429:
-
-            logging.error(
-                "🚫 Gemini quota/rate limit. "
-                "Не считаем такой ответ успешной проверкой."
-            )
 
         return None
 
@@ -1358,85 +1514,6 @@ def call_gemini(
     return extract_json(
         raw_text
     )
-
-
-# ============================================================
-# TOPIC ANTI-REPEAT
-# ============================================================
-
-def is_topic_repeated(
-    topic,
-    history
-):
-    if not history:
-        return False
-
-    local_score, local_item = (
-        get_topic_similarity_local(
-            topic,
-            history
-        )
-    )
-
-    if local_score >= SIMILARITY_THRESHOLD:
-
-        old_topic = (
-            local_item.get("topic")
-            or local_item.get("title")
-            or "неизвестная тема"
-        )
-
-        logging.warning(
-            "⚠️ Локально похожая тема: %.0f%% — %s",
-            local_score * 100,
-            old_topic
-        )
-
-        return True
-
-    logging.info(
-        "✅ Локально тема достаточно отличается: %.0f%%",
-        local_score * 100
-    )
-
-    return False
-
-
-# ============================================================
-# FIND UNIQUE TOPIC LOCALLY
-# ============================================================
-
-def find_unique_local_topic(
-    themes,
-    history
-):
-    shuffled_themes = list(
-        themes
-    )
-
-    random.shuffle(
-        shuffled_themes
-    )
-
-    for candidate_topic in shuffled_themes:
-
-        if contains_prompt_injection(
-            candidate_topic
-        ):
-            continue
-
-        logging.info(
-            "🔎 Локальная проверка темы: %s",
-            candidate_topic
-        )
-
-        if not is_topic_repeated(
-            candidate_topic,
-            history
-        ):
-            return candidate_topic
-
-    return None
 
 
 # ============================================================
@@ -1599,6 +1676,7 @@ def sanitize_post(result):
 
         cleaned[field] = value
 
+    # Форматирование списков
     cleaned["hook"] = format_numbered_paragraphs(
         cleaned["hook"]
     )
@@ -1611,6 +1689,7 @@ def sanitize_post(result):
         cleaned["cta"]
     )
 
+    # Хэштеги
     hashtags = sanitize_hashtags(
         result.get(
             "hashtags",
@@ -1630,6 +1709,7 @@ def sanitize_post(result):
         combined_text
     )
 
+    # Ограничения
     cleaned["title"] = shorten_text(
         cleaned["title"],
         MAX_TITLE_LENGTH
@@ -1807,181 +1887,38 @@ def generate_post():
         len(recent_history)
     )
 
-    today_themes = get_today_themes()
-
-    base_theme = random.choice(
-        today_themes
-    )
+    base_theme = get_today_theme()
 
     logging.info(
-        "🎯 Базовая тема дня: %s",
+        "🎯 Базовая случайная тема дня: %s",
         base_theme
     )
 
     # --------------------------------------------------------
-    # Пытаемся подобрать уникальную тему БЕЗ Gemini
+    # Выбор уникальной темы — ТОЛЬКО ЛОКАЛЬНО
     # --------------------------------------------------------
 
-    selected_topic = None
-
-    # Сначала проверяем выбранную случайную тему.
-    if not contains_prompt_injection(
-        base_theme
-    ):
-
-        logging.info(
-            "🔎 Проверка базовой темы: %s",
-            base_theme
-        )
-
-        if not is_topic_repeated(
-            base_theme,
-            recent_history
-        ):
-
-            selected_topic = base_theme
-
-            logging.info(
-                "✅ Выбрана уникальная тема: %s",
-                selected_topic
-            )
-
-    # --------------------------------------------------------
-    # Если базовая тема повторяется,
-    # перебираем остальные темы этого дня локально.
-    # Gemini здесь НЕ вызывается.
-    # --------------------------------------------------------
+    selected_topic = select_unique_topic(
+        recent_history
+    )
 
     if selected_topic is None:
 
-        logging.warning(
-            "🔄 Базовая тема повторяется — перебираем темы дня локально"
+        logging.error(
+            "❌ Не удалось подобрать новую тему"
         )
 
-        remaining_themes = [
-            theme
-            for theme in today_themes
-            if theme != base_theme
-        ]
+        return None
 
-        selected_topic = find_unique_local_topic(
-            remaining_themes,
-            recent_history
-        )
-
-    # --------------------------------------------------------
-    # Если все темы дня заняты,
-    # используем Gemini один раз для новой темы.
-    #
-    # Это редкий случай.
-    # --------------------------------------------------------
-
-    if selected_topic is None:
-
-        logging.warning(
-            "⚠️ Все стандартные темы дня похожи на историю"
-        )
-
-        alternative_prompt = f"""
-Придумай ОДНУ НОВУЮ тему для Telegram-поста
-о лидерстве, управлении или личной эффективности руководителя.
-
-BEGIN DATA
-
-ТЕМЫ СЕГОДНЯ:
-{
-    protect_prompt_data(
-        "\n".join(today_themes)
+    logging.info(
+        "✅ Выбрана уникальная тема: %s",
+        selected_topic
     )
-}
-
-ПОСЛЕДНИЕ ТЕМЫ:
-{
-    protect_prompt_data(
-        "\n".join(
-            (
-                item.get("topic")
-                or item.get("title")
-                or ""
-            )
-            for item in recent_history[-30:]
-        )
-    )
-}
-
-END DATA
-
-Новая тема должна:
-
-- быть конкретной;
-- решать другую проблему;
-- не быть перефразировкой старой темы;
-- подходить для канала «Лидерство без выгорания».
-
-Ответь только названием одной темы.
-"""
-
-        alternative_result = call_gemini(
-            GEMINI_MODELS[0],
-            SYSTEM_PROMPT,
-            alternative_prompt,
-            {
-                "type": "object",
-
-                "properties": {
-                    "topic": {
-                        "type": "string"
-                    }
-                },
-
-                "required": [
-                    "topic"
-                ]
-            }
-        )
-
-        if (
-            isinstance(
-                alternative_result,
-                dict
-            )
-            and alternative_result.get(
-                "topic"
-            )
-        ):
-
-            candidate_topic = clean_ai_text(
-                alternative_result["topic"]
-            )
-
-            if (
-                candidate_topic
-                and not contains_prompt_injection(
-                    candidate_topic
-                )
-                and not is_topic_repeated(
-                    candidate_topic,
-                    recent_history
-                )
-            ):
-
-                selected_topic = candidate_topic
-
-                logging.info(
-                    "✅ Gemini предложил уникальную тему: %s",
-                    selected_topic
-                )
-
-        if selected_topic is None:
-
-            logging.error(
-                "❌ Не удалось подобрать уникальную тему"
-            )
-
-            return None
 
     # --------------------------------------------------------
     # Генерируем пост
+    #
+    # Теперь это ПЕРВЫЙ запрос Gemini за запуск.
     # --------------------------------------------------------
 
     generated = None
@@ -2028,38 +1965,53 @@ END DATA
         return None
 
     # --------------------------------------------------------
-    # ВАЖНО:
-    # отдельную Gemini-проверку заголовка удалили.
+    # Проверяем уже готовый заголовок
     #
-    # Вместо неё используем локальную проверку.
-    # Это экономит ещё один запрос Gemini.
+    # ВАЖНО:
+    # НЕ вызываем Gemini.
+    # Используем только локальную проверку.
     # --------------------------------------------------------
 
-    title_local_score, title_local_item = (
+    title_score, title_item = (
         get_topic_similarity_local(
             generated["title"],
             recent_history
         )
     )
 
-    if title_local_score >= SIMILARITY_THRESHOLD:
+    if title_score >= SIMILARITY_THRESHOLD:
 
-        old_title = (
-            title_local_item.get("topic")
-            or title_local_item.get("title")
-            or "неизвестная тема"
-        )
+        old_title = "неизвестная тема"
+
+        if title_item:
+
+            old_title = (
+                title_item.get("topic")
+                or title_item.get("title")
+                or old_title
+            )
 
         logging.warning(
             "⚠️ Готовый заголовок локально похож на старый: %.0f%% — %s",
-            title_local_score * 100,
+            title_score * 100,
             old_title
+        )
+
+        logging.error(
+            "❌ Пост не публикуем из-за риска повтора"
         )
 
         return None
 
+    logging.info(
+        "✅ Заголовок локально достаточно новый: %.0f%%",
+        title_score * 100
+    )
+
     # --------------------------------------------------------
     # EDITOR
+    #
+    # Это ВТОРОЙ запрос Gemini за запуск.
     # --------------------------------------------------------
 
     edit_prompt = build_edit_prompt(
@@ -2281,6 +2233,10 @@ def build_telegram_text(post):
         post
     )
 
+    # --------------------------------------------------------
+    # Сначала body
+    # --------------------------------------------------------
+
     while (
         telegram_visible_length(caption)
         > MAX_TELEGRAM_CAPTION
@@ -2302,6 +2258,10 @@ def build_telegram_text(post):
         caption = render_caption(
             post
         )
+
+    # --------------------------------------------------------
+    # Hook
+    # --------------------------------------------------------
 
     while (
         telegram_visible_length(caption)
@@ -2325,6 +2285,10 @@ def build_telegram_text(post):
             post
         )
 
+    # --------------------------------------------------------
+    # CTA
+    # --------------------------------------------------------
+
     while (
         telegram_visible_length(caption)
         > MAX_TELEGRAM_CAPTION
@@ -2343,6 +2307,10 @@ def build_telegram_text(post):
             post
         )
 
+    # --------------------------------------------------------
+    # Title
+    # --------------------------------------------------------
+
     while (
         telegram_visible_length(caption)
         > MAX_TELEGRAM_CAPTION
@@ -2360,6 +2328,10 @@ def build_telegram_text(post):
         caption = render_caption(
             post
         )
+
+    # --------------------------------------------------------
+    # Emergency
+    # --------------------------------------------------------
 
     if telegram_visible_length(
         caption
@@ -2660,7 +2632,7 @@ def main():
         "=========================================="
     )
     logging.info(
-        "🚀 TELEGRAM AI EDITOR V4"
+        "🚀 TELEGRAM AI EDITOR V5"
     )
     logging.info(
         "=========================================="
@@ -2669,12 +2641,23 @@ def main():
     check_required_env()
 
     logging.info(
-        "🤖 Gemini: Gemini 3.6 Flash"
+        "🤖 Gemini: %s",
+        GEMINI_MODEL
     )
 
     logging.info(
         "🧠 Анти-повтор: последние %s недель",
         ANTI_REPEAT_WEEKS
+    )
+
+    logging.info(
+        "💡 Анти-повтор работает локально — "
+        "без расхода Gemini quota"
+    )
+
+    logging.info(
+        "💡 Gemini используется только для "
+        "генерации + редактора"
     )
 
     # --------------------------------------------------------
@@ -2813,7 +2796,7 @@ def main():
     )
 
     logging.info(
-        "🎉 V4 успешно завершил работу"
+        "🎉 V5 успешно завершил работу"
     )
 
 
