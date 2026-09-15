@@ -12,7 +12,7 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V8.1 — TELEGRAM CONTENT ENGINE
+# V8.2 — TELEGRAM CONTENT ENGINE
 # Отказоустойчивая генерация + контроль качества + баланс тем + безопасный Telegram HTML
 # ============================================================
 
@@ -53,13 +53,14 @@ MAX_CAPTION = 950  # целевой размер для Telegram photo caption
 TELEGRAM_CAPTION_LIMIT = 1024
 MAX_GENERATED_CHARS = 1024
 MAX_GENERATION_ATTEMPTS_PER_MODEL = 2
+THINKING_LEVEL = "low"
 QUALITY_THRESHOLD = 75
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v8.1")
+log = logging.getLogger("autopost-v8.2")
 
 
 # ============================================================
@@ -555,24 +556,44 @@ def build_prompt(topic, rubric, repair=False):
 
 Создай один законченный, полезный Telegram-пост для руководителей.
 
-СТРУКТУРА:
-1. Сильный заголовок или первый тезис — 1 строка.
-2. Проблема/наблюдение — 1–2 коротких абзаца.
-3. Практическая управленческая мысль — основная часть.
-4. Конкретный алгоритм, приём или 3–4 действия, которые можно применить.
-5. Короткий вывод.
-6. Вопрос читателю или конкретное действие.
-7. 2–3 релевантных хэштега.
+СТРУКТУРА И ОФОРМЛЕНИЕ:
 
-ТРЕБОВАНИЯ:
+🎯 Заголовок/главный тезис — 1 короткая строка.
+
+Короткий заход: 2–3 предложения, которые сразу показывают проблему руководителя.
+
+💡 <b>Главная мысль</b>
+1 короткий абзац с конкретным управленческим выводом.
+
+🛠 <b>Что делать</b>
+Дай 3–4 коротких действия. Можно использовать нумерованный список:
+1️⃣ ...
+2️⃣ ...
+3️⃣ ...
+4️⃣ ...
+
+⚠️ <b>Важно</b>
+1 короткое предупреждение о типичной ошибке или нюансе. Этот блок можно пропустить, если он искусственный.
+
+👉 Финальный вывод + один естественный вопрос читателю.
+
+#лидерство #управление #команда
+
+ТРЕБОВАНИЯ К ВИЗУАЛЬНОМУ СТИЛЮ:
+- 4–6 уместных эмодзи на весь пост, не больше;
+- эмодзи используй как визуальные маркеры разделов, а не в каждом предложении;
+- между смысловыми блоками обязательно оставляй пустую строку;
+- предложения короткие, абзацы по 1–3 строки;
+- списки оформляй отдельными строками;
+- не делай длинных «простыней» текста;
+- не ставь два одинаковых эмодзи подряд;
+- хэштеги — только отдельной последней строкой;
 - ориентир 600–850 символов; допустимый диапазон 500–900;
 - абсолютный максимум 950 символов с учётом хэштегов;
 - полностью закончи последнюю мысль;
 - не обрывай предложения или списки;
 - не выдумывай статистику, исследования, цитаты, факты или имена;
 - гипотетические примеры обозначай как пример;
-- 2–3 уместных эмодзи;
-- короткие абзацы;
 - без банальных фраз вроде «успешный руководитель должен…» без конкретики.
 
 TELEGRAM HTML:
@@ -609,8 +630,12 @@ def gemini_request(model, prompt):
             }
         ],
         "generationConfig": {
-            "maxOutputTokens": 2400,
-            "temperature": 0.75,
+            # Gemini 3.x тратит maxOutputTokens также на thinking tokens.
+            # Для короткого Telegram-поста low существенно снижает риск MAX_TOKENS.
+            "maxOutputTokens": 1800,
+            "thinkingConfig": {
+                "thinkingLevel": THINKING_LEVEL,
+            },
         },
     }
 
@@ -712,6 +737,42 @@ def get_finish_reason(data):
         return ""
 
 
+def emoji_count(text):
+    # Достаточно широкий диапазон Unicode-эмодзи для контроля оформления.
+    return len(re.findall(
+        r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF]",
+        strip_html(text),
+    ))
+
+
+def formatting_score(text):
+    clean = sanitize_telegram_html(text)
+    body, hashtags = split_hashtags(clean)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    emojis = emoji_count(body)
+    score = 0
+
+    if 4 <= emojis <= 6:
+        score += 8
+    elif 2 <= emojis <= 8:
+        score += 5
+
+    if len(paragraphs) >= 4:
+        score += 6
+    elif len(paragraphs) >= 3:
+        score += 4
+
+    # Визуальные маркеры разделов.
+    if re.search(r"(?:^|\n)(?:🎯|💡|🛠|⚠️|👉)\s*", body):
+        score += 6
+
+    # Нумерованный список — хороший признак практического формата.
+    if re.search(r"(?:^|\n)1️⃣?\s+", body):
+        score += 3
+
+    return min(score, 20)
+
+
 def score_post(text, topic):
     """Локальная оценка качества без дополнительного AI-запроса."""
     clean = sanitize_telegram_html(text)
@@ -720,6 +781,11 @@ def score_post(text, topic):
 
     score = 0
     reasons = []
+
+    visual = formatting_score(clean)
+    score += visual
+    if visual < 14:
+        reasons.append("слабое визуальное оформление")
 
     length = len(plain)
     if 500 <= length <= 900:
@@ -809,6 +875,10 @@ def generate_with_failover(topic, rubric):
 
                     if text and looks_like_complete_post(text, finish_reason):
                         quality, reasons = score_post(text, topic)
+                        log.info(
+                            "🎨 Оформление: %s эмодзи | визуальный формат проверен",
+                            emoji_count(text),
+                        )
                         log.info(
                             "📊 Качество поста: %s/100%s",
                             quality,
@@ -1114,7 +1184,7 @@ def publish(caption, image):
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM CONTENT ENGINE V8.1")
+    print("🚀 TELEGRAM CONTENT ENGINE V8.2")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1232,7 +1302,7 @@ def main():
         )
 
         log.info(
-            "🎉 V8.1 завершил работу успешно"
+            "🎉 V8.2 завершил работу успешно"
         )
 
         return 0
