@@ -12,8 +12,8 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V7 — TELEGRAM AI EDITOR
-# Надёжная генерация + failover Gemini + безопасный Telegram HTML
+# V8 — TELEGRAM CONTENT ENGINE
+# Отказоустойчивая генерация + контроль качества + баланс тем + безопасный Telegram HTML
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -50,12 +50,14 @@ UNSPLASH_TIMEOUT = 25
 
 HISTORY_WEEKS = 8
 MAX_CAPTION = 950  # запас до лимита Telegram 1024
+MAX_GENERATION_ATTEMPTS_PER_MODEL = 2
+QUALITY_THRESHOLD = 75
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v7")
+log = logging.getLogger("autopost-v8")
 
 
 # ============================================================
@@ -274,7 +276,7 @@ def recent_history():
     return result
 
 
-def choose_topic(candidates):
+def choose_topic(candidates, rubric):
     history = recent_history()
 
     log.info(
@@ -282,6 +284,11 @@ def choose_topic(candidates):
         HISTORY_WEEKS,
         len(history),
     )
+
+    rubric_counts = {}
+    for item in history:
+        r = item.get("rubric", "")
+        rubric_counts[r] = rubric_counts.get(r, 0) + 1
 
     scored = []
 
@@ -293,32 +300,34 @@ def choose_topic(candidates):
             sim = similarity_percent(topic, old_topic)
             max_sim = max(max_sim, sim)
 
-        scored.append((max_sim, topic))
+        # Небольшой бонус темам, которые давно не использовались.
+        rubric_load = rubric_counts.get(rubric, 0)
+        balance_penalty = min(rubric_load * 3, 15)
+        score = max_sim + balance_penalty
+
+        scored.append((score, max_sim, topic))
 
         log.info(
-            "🔎 Локальная проверка: %s → %s%%",
+            "🔎 Локальная проверка: %s → сходство %s%% | нагрузка рубрики %s | score %s",
             topic,
             max_sim,
+            rubric_load,
+            score,
         )
 
-    # 40% и выше считаем слишком похожим.
-    acceptable = [
-        item for item in scored
-        if item[0] < 40
-    ]
+    acceptable = [item for item in scored if item[1] < 40]
 
-    if acceptable:
-        selected = random.choice(acceptable)
-    else:
-        selected = min(scored, key=lambda x: x[0])
+    pool = acceptable if acceptable else scored
+    selected = min(pool, key=lambda x: x[0])
 
     log.info(
-        "✅ Выбрана тема: %s | сходство: %s%%",
+        "✅ Выбрана тема: %s | сходство: %s%% | score: %s",
+        selected[2],
         selected[1],
         selected[0],
     )
 
-    return selected[1]
+    return selected[2]
 
 
 def record_success(topic, rubric, model, text):
@@ -516,43 +525,57 @@ def valid_basic_html(text):
 # GEMINI
 # ============================================================
 
-def build_prompt(topic, rubric):
+def build_prompt(topic, rubric, repair=False):
+    repair_text = ""
+    if repair:
+        repair_text = """
+
+ВАЖНО: предыдущая генерация была отклонена как незавершённая.
+Сейчас создай НОВЫЙ пост целиком. Не сокращай его и не начинай с середины мысли.
+Перед ответом мысленно проверь: есть заголовок, практическая часть, вывод, вопрос и хэштеги.
+"""
+
     return f"""
-Ты — главный редактор Telegram-канала о лидерстве и управлении
-«Лидерство без выгорания».
+Ты — главный редактор Telegram-канала «Лидерство без выгорания».
 
 Рубрика: {rubric}
 Тема: {topic}
 
-Задача: создай один сильный Telegram-пост для руководителей.
+Создай один законченный, полезный Telegram-пост для руководителей.
 
-Требования:
-1. 600–850 символов.
-2. Пост должен быть полностью законченным: не обрывай предложение, мысль или абзац.
-3. Последняя содержательная строка должна заканчиваться нормальным знаком препинания.
-4. Начни с сильного тезиса, наблюдения или вопроса.
-3. Дай конкретную управленческую мысль, которую можно применить на практике.
-4. Не пересказывай очевидности.
-5. Не выдумывай статистику, исследования, цитаты, факты или имена.
-6. Если приводишь пример — обозначай его как гипотетическую ситуацию.
-7. Используй 2–3 уместных эмодзи, без перегруза.
-8. В конце — короткий вопрос читателю или практическое действие.
-9. Добавь 2–3 релевантных хэштега.
-10. Используй короткие абзацы.
+СТРУКТУРА:
+1. Сильный заголовок или первый тезис — 1 строка.
+2. Проблема/наблюдение — 1–2 коротких абзаца.
+3. Практическая управленческая мысль — основная часть.
+4. Конкретный алгоритм, приём или 3–4 действия, которые можно применить.
+5. Короткий вывод.
+6. Вопрос читателю или конкретное действие.
+7. 2–3 релевантных хэштега.
 
-КРИТИЧЕСКИ ВАЖНО ДЛЯ TELEGRAM:
-- НЕЛЬЗЯ использовать <br>, <br/>, <p>, <div>, <span>.
-- Для переноса строки используй настоящий символ новой строки.
-- Разрешены только:
-  <b>...</b>
-  <i>...</i>
-  <u>...</u>
-  <s>...</s>
-  <code>...</code>
-- Не используй Markdown **жирный**, *курсив*, ```код```.
-- Не используй ссылки.
-- Не добавляй пояснения от редактора.
-- Верни ТОЛЬКО готовый текст поста.
+ТРЕБОВАНИЯ:
+- ориентир 600–850 символов; допустим диапазон примерно 500–950;
+- полностью закончи последнюю мысль;
+- не обрывай предложения или списки;
+- не выдумывай статистику, исследования, цитаты, факты или имена;
+- гипотетические примеры обозначай как пример;
+- 2–3 уместных эмодзи;
+- короткие абзацы;
+- без банальных фраз вроде «успешный руководитель должен…» без конкретики.
+
+TELEGRAM HTML:
+- нельзя использовать <br>, <br/>, <p>, <div>, <span>;
+- переносы делай настоящими символами новой строки;
+- разрешены только <b>, <i>, <u>, <s>, <code>;
+- не используй Markdown;
+- не добавляй ссылки, служебные комментарии или пояснения редактора.
+
+ФИНАЛЬНАЯ ПРОВЕРКА ПЕРЕД ОТВЕТОМ:
+- текст завершён;
+- последняя содержательная строка заканчивается на . ! ? или ) ;
+- присутствуют хэштеги;
+- пост можно сразу отправить в Telegram.
+
+Верни ТОЛЬКО готовый текст поста.{repair_text}
 """.strip()
 
 
@@ -572,7 +595,8 @@ def gemini_request(model, prompt):
             }
         ],
         "generationConfig": {
-            "maxOutputTokens": 1800,
+            "maxOutputTokens": 2400,
+            "temperature": 0.75,
         },
     }
 
@@ -642,108 +666,180 @@ def looks_like_complete_post(text):
     return True
 
 
+def get_finish_reason(data):
+    try:
+        return str(data["candidates"][0].get("finishReason", ""))
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def score_post(text, topic):
+    """Локальная оценка качества без дополнительного AI-запроса."""
+    clean = sanitize_telegram_html(text)
+    plain = strip_html(clean).strip()
+    score = 0
+    reasons = []
+
+    length = len(plain)
+    if 500 <= length <= 950:
+        score += 20
+    elif 430 <= length < 500 or 950 < length <= 1020:
+        score += 14
+    else:
+        score += 6
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", plain) if p.strip()]
+    if len(paragraphs) >= 4:
+        score += 15
+    elif len(paragraphs) >= 3:
+        score += 10
+
+    practical_words = {
+        "шаг", "вопрос", "алгоритм", "проверьте", "сначала", "затем",
+        "попробуйте", "сформулируйте", "задайте", "определите", "действие",
+        "правило", "приём", "инструмент", "сделайте",
+    }
+    low = plain.lower()
+    practical_hits = sum(1 for w in practical_words if w in low)
+    if practical_hits >= 3:
+        score += 20
+    elif practical_hits >= 1:
+        score += 12
+    else:
+        score += 5
+        reasons.append("мало практической конкретики")
+
+    if "#" in plain:
+        score += 10
+    else:
+        reasons.append("нет хэштегов")
+
+    if re.search(r"[.!?)]$", plain):
+        score += 10
+    else:
+        reasons.append("нет нормального завершения")
+
+    if any(x in low for x in ["руководитель", "сотрудник", "команда", "задач"]):
+        score += 10
+    else:
+        reasons.append("слабая связь с управленческой темой")
+
+    topic_tokens = tokens(topic)
+    text_tokens = tokens(plain)
+    if topic_tokens and topic_tokens & text_tokens:
+        score += 5
+    else:
+        reasons.append("тема слабо отражена в тексте")
+
+    if re.search(r"(^|\n)[-•]", plain):
+        score += 5
+
+    return min(score, 100), reasons
+
+
+def looks_like_complete_post(text, finish_reason=""):
+    if not text:
+        return False
+
+    clean = sanitize_telegram_html(text)
+    plain = strip_html(clean).strip()
+
+    # Gemini явно сообщает о жёстком обрыве по лимиту токенов.
+    if finish_reason.upper() in {"MAX_TOKENS", "LENGTH"}:
+        return False
+
+    if len(plain) < 430:
+        return False
+
+    if "#" not in plain:
+        return False
+
+    if plain.rstrip().endswith(("-", "—", ",", ":", ";", "…")):
+        return False
+
+    if not re.search(r"[.!?)]$", plain.rstrip()):
+        return False
+
+    return True
+
+
 def generate_with_failover(topic, rubric):
-    prompt = build_prompt(
-        topic,
-        rubric,
-    )
-
     for model in GEMINI_MODELS:
-        log.info(
-            "🤖 Gemini генерация: %s",
-            model,
-        )
+        log.info("🤖 Gemini генерация: %s", model)
 
-        for attempt in range(1, 4):
+        for attempt in range(1, MAX_GENERATION_ATTEMPTS_PER_MODEL + 1):
+            repair = attempt > 1
+            prompt = build_prompt(topic, rubric, repair=repair)
+
             try:
-                response = gemini_request(
-                    model,
-                    prompt,
-                )
+                response = gemini_request(model, prompt)
 
                 if response.status_code == 200:
-                    text = extract_gemini_text(
-                        response.json()
+                    data = response.json()
+                    text = extract_gemini_text(data)
+                    finish_reason = get_finish_reason(data)
+
+                    log.info(
+                        "🔍 Gemini %s | finishReason=%s | chars=%s",
+                        model,
+                        finish_reason or "NONE",
+                        len(strip_html(sanitize_telegram_html(text))) if text else 0,
                     )
 
-                    if text:
-                        if looks_like_complete_post(text):
-                            log.info(
-                                "✅ Gemini успешно: %s | попытка %s | %s символов",
-                                model,
-                                attempt,
-                                len(strip_html(sanitize_telegram_html(text))),
-                            )
+                    if text and looks_like_complete_post(text, finish_reason):
+                        quality, reasons = score_post(text, topic)
+                        log.info(
+                            "📊 Качество поста: %s/100%s",
+                            quality,
+                            f" | {', '.join(reasons)}" if reasons else "",
+                        )
 
+                        if quality >= QUALITY_THRESHOLD:
+                            log.info(
+                                "✅ Gemini принят: %s | попытка %s | качество %s/100",
+                                model, attempt, quality,
+                            )
                             return text, model
 
                         log.warning(
-                            "⚠️ Gemini вернул незавершённый/слишком короткий пост "
-                            "| %s | попытка %s/3 — генерируем заново",
-                            model,
-                            attempt,
+                            "⚠️ Пост отклонён по качеству: %s/100 | порог %s",
+                            quality, QUALITY_THRESHOLD,
+                        )
+                    else:
+                        log.warning(
+                            "⚠️ Ответ отклонён | %s | finishReason=%s | попытка %s/%s",
+                            model, finish_reason or "NONE", attempt, MAX_GENERATION_ATTEMPTS_PER_MODEL,
                         )
 
-                        if attempt < 3:
-                            time.sleep(
-                                1.5 + random.uniform(0.5, 1.5)
-                            )
-
-                        continue
-
-                    log.warning(
-                        "⚠️ %s вернул пустой ответ",
-                        model,
-                    )
-
-                    break
+                    if attempt < MAX_GENERATION_ATTEMPTS_PER_MODEL:
+                        time.sleep(1.5 + random.uniform(0.3, 1.0))
+                    continue
 
                 if response.status_code in RETRYABLE_HTTP:
                     log.warning(
-                        "⚠️ Gemini HTTP %s | %s | попытка %s/3",
-                        response.status_code,
-                        model,
-                        attempt,
+                        "⚠️ Gemini HTTP %s | %s | попытка %s/%s",
+                        response.status_code, model, attempt, MAX_GENERATION_ATTEMPTS_PER_MODEL,
                     )
-
-                    if attempt < 3:
-                        delay = (
-                            (2 ** (attempt - 1)) * 3
-                            + random.uniform(0.5, 1.5)
-                        )
-
+                    if attempt < MAX_GENERATION_ATTEMPTS_PER_MODEL:
+                        delay = 2 + (2 ** (attempt - 1)) + random.uniform(0.5, 1.5)
                         time.sleep(delay)
-
                     continue
 
-                # Постоянная ошибка: повторять тот же запрос нет смысла.
                 log.error(
                     "❌ Gemini HTTP %s | %s: %s",
-                    response.status_code,
-                    model,
-                    response.text[:500],
+                    response.status_code, model, response.text[:500],
                 )
-
                 break
 
             except requests.RequestException as exc:
                 log.warning(
-                    "⚠️ Сетевая ошибка Gemini | %s | попытка %s/3: %s",
-                    model,
-                    attempt,
-                    exc,
+                    "⚠️ Сетевая ошибка Gemini | %s | попытка %s/%s: %s",
+                    model, attempt, MAX_GENERATION_ATTEMPTS_PER_MODEL, exc,
                 )
+                if attempt < MAX_GENERATION_ATTEMPTS_PER_MODEL:
+                    time.sleep(2 + random.uniform(0.5, 1.5))
 
-                if attempt < 3:
-                    time.sleep(
-                        3 * attempt
-                        + random.uniform(0.5, 1.5)
-                    )
-
-        log.warning(
-            "➡️ Переключаемся с %s на следующую модель",
-            model,
-        )
+        log.warning("➡️ Переключаемся с %s на следующую модель", model)
 
     return None, None
 
@@ -756,29 +852,25 @@ def local_fallback(topic):
     templates = [
         (
             f"<b>{topic}</b>\n\n"
-            "Иногда управленческая проблема начинается не с сотрудника, "
-            "а с того, как руководитель формулирует ситуацию.\n\n"
-            "Перед тем как давать оценку, задайте три вопроса: "
-            "что произошло фактически, чего я ожидаю и что конкретно "
-            "нужно изменить дальше.\n\n"
-            "Так разговор превращается из критики в управленческое действие. 🎯\n\n"
-            "Какой из этих трёх вопросов вы чаще всего пропускаете?\n\n"
+            "Управленческие проблемы редко решаются одной правильной фразой. "
+            "Гораздо важнее сначала отделить факт от собственной оценки.\n\n"
+            "Попробуйте простой алгоритм: 1) назовите, что произошло; "
+            "2) объясните последствия; 3) сформулируйте ожидаемый результат; "
+            "4) договоритесь о следующем действии.\n\n"
+            "Так разговор становится не критикой, а рабочим инструментом. 🎯\n\n"
+            "Какой шаг вы чаще всего пропускаете?\n\n"
             "#лидерство #управление #руководитель"
         ),
         (
             f"<b>{topic}</b>\n\n"
-            "Сильный руководитель не обязан лично решать каждую проблему. "
-            "Его задача — создать условия, в которых команда способна "
-            "решать проблемы самостоятельно.\n\n"
-            "Попробуйте сегодня вместо готового ответа спросить: "
-            "«Какое решение ты считаешь лучшим и почему?»\n\n"
-            "Один такой вопрос иногда развивает сотрудника сильнее, "
-            "чем длинная инструкция. 💡\n\n"
-            "Попробуете применить его на этой неделе?\n\n"
+            "Сильная команда начинается не с постоянного контроля, а с понятных правил игры. "
+            "Сотрудник должен понимать не только что сделать, но и какой результат считается хорошим.\n\n"
+            "Перед новой задачей проверьте четыре вещи: цель, ожидаемый результат, срок и границы самостоятельного решения. "
+            "После этого задайте один вопрос: «Что тебе сейчас нужно от меня?» 💡\n\n"
+            "Это простой способ уменьшить микроменеджмент и повысить ответственность.\n\n"
             "#лидерство #делегирование #команда"
         ),
     ]
-
     return random.choice(templates)
 
 
@@ -1001,7 +1093,7 @@ def publish(caption, image):
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM AI EDITOR V7.1")
+    print("🚀 TELEGRAM CONTENT ENGINE V8")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1056,7 +1148,8 @@ def main():
             x
             for x in day_data["topics"]
             if x != base_topic
-        ]
+        ],
+        rubric,
     )
 
     generated, model = generate_with_failover(
@@ -1109,7 +1202,7 @@ def main():
         )
 
         log.info(
-            "🎉 V7 завершил работу успешно"
+            "🎉 V8 завершил работу успешно"
         )
 
         return 0
