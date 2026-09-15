@@ -12,7 +12,7 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V8 — TELEGRAM CONTENT ENGINE
+# V8.1 — TELEGRAM CONTENT ENGINE
 # Отказоустойчивая генерация + контроль качества + баланс тем + безопасный Telegram HTML
 # ============================================================
 
@@ -49,7 +49,9 @@ TELEGRAM_TIMEOUT = 40
 UNSPLASH_TIMEOUT = 25
 
 HISTORY_WEEKS = 8
-MAX_CAPTION = 950  # запас до лимита Telegram 1024
+MAX_CAPTION = 950  # целевой размер для Telegram photo caption
+TELEGRAM_CAPTION_LIMIT = 1024
+MAX_GENERATED_CHARS = 1024
 MAX_GENERATION_ATTEMPTS_PER_MODEL = 2
 QUALITY_THRESHOLD = 75
 
@@ -57,7 +59,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v8")
+log = logging.getLogger("autopost-v8.1")
 
 
 # ============================================================
@@ -221,6 +223,22 @@ def save_history(items):
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def history_persistence_diagnostic():
+    """
+    GitHub Actions каждый запуск получает чистое рабочее дерево.
+    Локальный topics_history.json между запусками сам по себе не сохраняется.
+    """
+    if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+        if HISTORY_FILE.exists():
+            log.info("🧠 История найдена: %s", HISTORY_FILE)
+        else:
+            log.warning(
+                "⚠️ GitHub Actions: %s отсутствует в начале run. "
+                "История анти-повтора между запусками пока не сохраняется.",
+                HISTORY_FILE.name,
+            )
 
 
 def normalize_topic(text):
@@ -450,37 +468,31 @@ def strip_html(text):
 
 
 def fit_caption(text, max_len=MAX_CAPTION):
+    """
+    Подготавливает caption без обрезания готовой мысли.
+    V8.1 не режет пост посередине: слишком длинный результат должен
+    быть отклонён генератором или заменён fallback.
+    """
+    text = sanitize_telegram_html(text).strip()
+
     if len(text) <= max_len:
         return text
 
-    log.warning(
-        "⚠️ Пост длиннее лимита Telegram: %s символов",
-        len(text),
-    )
+    compact = re.sub(r"[ \t]+", " ", text)
+    compact = re.sub(r"\n{3,}", "\n\n", compact).strip()
 
-    # Безопасный аварийный вариант.
-    plain = strip_html(text)
-    plain = re.sub(r"\s+", " ", plain).strip()
-
-    if len(plain) <= max_len:
-        return html.escape(
-            plain,
-            quote=False,
+    if len(compact) <= max_len:
+        log.warning(
+            "⚠️ Caption уплотнён: %s → %s символов",
+            len(text), len(compact),
         )
+        return compact
 
-    cut = plain[: max_len - 1]
-
-    if " " in cut:
-        cut = cut.rsplit(" ", 1)[0]
-
-    return (
-        html.escape(
-            cut.rstrip(),
-            quote=False,
-        )
-        + "…"
+    log.error(
+        "❌ Caption слишком длинный: %s символов — не обрезаем мысль",
+        len(compact),
     )
-
+    return ""
 
 def valid_basic_html(text):
     pairs = {
@@ -553,7 +565,8 @@ def build_prompt(topic, rubric, repair=False):
 7. 2–3 релевантных хэштега.
 
 ТРЕБОВАНИЯ:
-- ориентир 600–850 символов; допустим диапазон примерно 500–950;
+- ориентир 600–850 символов; допустимый диапазон 500–900;
+- абсолютный максимум 950 символов с учётом хэштегов;
 - полностью закончи последнюю мысль;
 - не обрывай предложения или списки;
 - не выдумывай статистику, исследования, цитаты, факты или имена;
@@ -571,7 +584,8 @@ TELEGRAM HTML:
 
 ФИНАЛЬНАЯ ПРОВЕРКА ПЕРЕД ОТВЕТОМ:
 - текст завершён;
-- последняя содержательная строка заканчивается на . ! ? или ) ;
+- последняя содержательная строка заканчивается на . ! ? или );
+- хэштеги находятся отдельной последней строкой и НЕ считаются частью финального предложения;
 - присутствуют хэштеги;
 - пост можно сразу отправить в Telegram.
 
@@ -633,38 +647,63 @@ def extract_gemini_text(data):
         return ""
 
 
-def looks_like_complete_post(text):
-    """
-    Проверяет, не оборвалась ли генерация Gemini посреди предложения.
-    Короткие/незаконченные ответы не отправляем в Telegram.
-    """
+def split_hashtags(text):
+    """Отделяет финальный блок хэштегов от содержательного текста."""
+    clean = sanitize_telegram_html(text)
+    plain = strip_html(clean).strip()
+    lines = plain.splitlines()
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    hashtag_lines = []
+    while lines:
+        line = lines[-1].strip()
+        if re.fullmatch(r"(?:#[\wА-Яа-яЁё0-9_-]+(?:\s+|$))+", line):
+            hashtag_lines.insert(0, line)
+            lines.pop()
+        else:
+            break
+
+    return "\n".join(lines).strip(), "\n".join(hashtag_lines).strip()
+
+
+def last_content_line(text):
+    body, _ = split_hashtags(text)
+    lines = [x.strip() for x in body.splitlines() if x.strip()]
+    return lines[-1] if lines else ""
+
+
+def looks_like_complete_post(text, finish_reason=""):
+    """Проверяет завершённость поста, не считая хэштеги финальным предложением."""
     if not text:
         return False
 
     clean = sanitize_telegram_html(text)
     plain = strip_html(clean).strip()
 
-    # Слишком короткий ответ — почти наверняка неполная генерация.
-    if len(plain) < 450:
+    if finish_reason.upper() in {"MAX_TOKENS", "LENGTH"}:
         return False
 
-    # Пост должен содержать хотя бы один хэштег.
-    if "#" not in plain:
+    if len(plain) < 430 or len(plain) > TELEGRAM_CAPTION_LIMIT:
         return False
 
-    # Если последняя строка выглядит оборванной — не публикуем.
-    last = plain.rstrip()
+    body, hashtags = split_hashtags(clean)
 
-    # Типичные признаки обрыва генерации.
-    if last.endswith(("-", "—", ",", ":", ";", "…")):
+    if not hashtags:
         return False
 
-    # Последний символ должен выглядеть как нормальное завершение.
-    if not re.search(r"[.!?)]$", last):
+    content_last = last_content_line(clean)
+    if not content_last:
+        return False
+
+    if content_last.endswith(("-", "—", ",", ":", ";", "…")):
+        return False
+
+    if not re.search(r"[.!?)]$", content_last):
         return False
 
     return True
-
 
 def get_finish_reason(data):
     try:
@@ -677,30 +716,37 @@ def score_post(text, topic):
     """Локальная оценка качества без дополнительного AI-запроса."""
     clean = sanitize_telegram_html(text)
     plain = strip_html(clean).strip()
+    body, hashtags = split_hashtags(clean)
+
     score = 0
     reasons = []
 
     length = len(plain)
-    if 500 <= length <= 950:
+    if 500 <= length <= 900:
         score += 20
-    elif 430 <= length < 500 or 950 < length <= 1020:
+    elif 430 <= length <= 1024:
         score += 14
     else:
-        score += 6
+        score += 5
+        reasons.append("неоптимальная длина")
 
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", plain) if p.strip()]
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
     if len(paragraphs) >= 4:
         score += 15
     elif len(paragraphs) >= 3:
         score += 10
+    else:
+        reasons.append("мало абзацев")
 
     practical_words = {
         "шаг", "вопрос", "алгоритм", "проверьте", "сначала", "затем",
         "попробуйте", "сформулируйте", "задайте", "определите", "действие",
-        "правило", "приём", "инструмент", "сделайте",
+        "правило", "приём", "инструмент", "сделайте", "договоритесь",
     }
-    low = plain.lower()
+
+    low = body.lower()
     practical_hits = sum(1 for w in practical_words if w in low)
+
     if practical_hits >= 3:
         score += 20
     elif practical_hits >= 1:
@@ -709,12 +755,13 @@ def score_post(text, topic):
         score += 5
         reasons.append("мало практической конкретики")
 
-    if "#" in plain:
+    if hashtags:
         score += 10
     else:
         reasons.append("нет хэштегов")
 
-    if re.search(r"[.!?)]$", plain):
+    content_last = last_content_line(clean)
+    if re.search(r"[.!?)]$", content_last):
         score += 10
     else:
         reasons.append("нет нормального завершения")
@@ -725,42 +772,16 @@ def score_post(text, topic):
         reasons.append("слабая связь с управленческой темой")
 
     topic_tokens = tokens(topic)
-    text_tokens = tokens(plain)
+    text_tokens = tokens(body)
     if topic_tokens and topic_tokens & text_tokens:
         score += 5
     else:
         reasons.append("тема слабо отражена в тексте")
 
-    if re.search(r"(^|\n)[-•]", plain):
+    if re.search(r"(^|\n)[-•]", body):
         score += 5
 
     return min(score, 100), reasons
-
-
-def looks_like_complete_post(text, finish_reason=""):
-    if not text:
-        return False
-
-    clean = sanitize_telegram_html(text)
-    plain = strip_html(clean).strip()
-
-    # Gemini явно сообщает о жёстком обрыве по лимиту токенов.
-    if finish_reason.upper() in {"MAX_TOKENS", "LENGTH"}:
-        return False
-
-    if len(plain) < 430:
-        return False
-
-    if "#" not in plain:
-        return False
-
-    if plain.rstrip().endswith(("-", "—", ",", ":", ";", "…")):
-        return False
-
-    if not re.search(r"[.!?)]$", plain.rstrip()):
-        return False
-
-    return True
 
 
 def generate_with_failover(topic, rubric):
@@ -1093,7 +1114,7 @@ def publish(caption, image):
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM CONTENT ENGINE V8")
+    print("🚀 TELEGRAM CONTENT ENGINE V8.1")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1120,6 +1141,8 @@ def main():
             "Не заданы обязательные переменные: "
             + ", ".join(missing)
         )
+
+    history_persistence_diagnostic()
 
     now = datetime.now()
     weekday = now.weekday()
@@ -1162,9 +1185,16 @@ def main():
             generated
         )
 
-        caption = fit_caption(
-            caption
-        )
+        fitted = fit_caption(caption)
+
+        if not fitted:
+            log.warning(
+                "🛟 Сгенерированный пост слишком длинный — используем локальный fallback"
+            )
+            caption = local_fallback(topic)
+            model = "local-fallback"
+        else:
+            caption = fitted
 
         log.info(
             "🧠 Использована модель: %s",
@@ -1202,7 +1232,7 @@ def main():
         )
 
         log.info(
-            "🎉 V8 завершил работу успешно"
+            "🎉 V8.1 завершил работу успешно"
         )
 
         return 0
