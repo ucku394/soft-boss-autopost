@@ -528,7 +528,9 @@ def build_prompt(topic, rubric):
 
 Требования:
 1. 600–850 символов.
-2. Начни с сильного тезиса, наблюдения или вопроса.
+2. Пост должен быть полностью законченным: не обрывай предложение, мысль или абзац.
+3. Последняя содержательная строка должна заканчиваться нормальным знаком препинания.
+4. Начни с сильного тезиса, наблюдения или вопроса.
 3. Дай конкретную управленческую мысль, которую можно применить на практике.
 4. Не пересказывай очевидности.
 5. Не выдумывай статистику, исследования, цитаты, факты или имена.
@@ -570,7 +572,7 @@ def gemini_request(model, prompt):
             }
         ],
         "generationConfig": {
-            "maxOutputTokens": 1400,
+            "maxOutputTokens": 1800,
         },
     }
 
@@ -607,6 +609,39 @@ def extract_gemini_text(data):
         return ""
 
 
+def looks_like_complete_post(text):
+    """
+    Проверяет, не оборвалась ли генерация Gemini посреди предложения.
+    Короткие/незаконченные ответы не отправляем в Telegram.
+    """
+    if not text:
+        return False
+
+    clean = sanitize_telegram_html(text)
+    plain = strip_html(clean).strip()
+
+    # Слишком короткий ответ — почти наверняка неполная генерация.
+    if len(plain) < 450:
+        return False
+
+    # Пост должен содержать хотя бы один хэштег.
+    if "#" not in plain:
+        return False
+
+    # Если последняя строка выглядит оборванной — не публикуем.
+    last = plain.rstrip()
+
+    # Типичные признаки обрыва генерации.
+    if last.endswith(("-", "—", ",", ":", ";", "…")):
+        return False
+
+    # Последний символ должен выглядеть как нормальное завершение.
+    if not re.search(r"[.!?)]$", last):
+        return False
+
+    return True
+
+
 def generate_with_failover(topic, rubric):
     prompt = build_prompt(
         topic,
@@ -632,13 +667,29 @@ def generate_with_failover(topic, rubric):
                     )
 
                     if text:
-                        log.info(
-                            "✅ Gemini успешно: %s | попытка %s",
+                        if looks_like_complete_post(text):
+                            log.info(
+                                "✅ Gemini успешно: %s | попытка %s | %s символов",
+                                model,
+                                attempt,
+                                len(strip_html(sanitize_telegram_html(text))),
+                            )
+
+                            return text, model
+
+                        log.warning(
+                            "⚠️ Gemini вернул незавершённый/слишком короткий пост "
+                            "| %s | попытка %s/3 — генерируем заново",
                             model,
                             attempt,
                         )
 
-                        return text, model
+                        if attempt < 3:
+                            time.sleep(
+                                1.5 + random.uniform(0.5, 1.5)
+                            )
+
+                        continue
 
                     log.warning(
                         "⚠️ %s вернул пустой ответ",
@@ -950,7 +1001,7 @@ def publish(caption, image):
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM AI EDITOR V7")
+    print("🚀 TELEGRAM AI EDITOR V7.1")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
