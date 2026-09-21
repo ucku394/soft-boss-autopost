@@ -799,11 +799,22 @@ def choose_topic(candidates, rubric):
 
 
 def choose_visual_style(topic, content_format):
-    """Выбирает визуальный стиль с защитой от недавнего повторения."""
+    """Выбирает совместимый с форматом визуальный стиль с защитой от повторов."""
+    compatible = {
+        "management_breakdown": ["classic", "question_open", "quote_open", "contrast", "checklist", "minimal"],
+        "practical_tool": ["classic", "question_open", "contrast", "checklist", "minimal"],
+        "psychology_story": ["classic", "question_open", "quote_open", "minimal"],
+        "dialogue_case": ["classic", "question_open", "contrast", "dialogue_open"],
+        "management_mistake": ["classic", "question_open", "quote_open", "contrast", "minimal"],
+        "mini_test": ["classic", "question_open", "contrast", "checklist"],
+        "weekly_reflection": ["classic", "question_open", "quote_open", "minimal"],
+    }
+    allowed = compatible.get(content_format, list(VISUAL_STYLE_PROFILES))
     history = recent_history()
     scored = []
 
-    for style_key, profile in VISUAL_STYLE_PROFILES.items():
+    for style_key in allowed:
+        profile = VISUAL_STYLE_PROFILES[style_key]
         penalty = 0
         recent_same_style = 0
 
@@ -2025,6 +2036,7 @@ def main():
             "🎉 V8.8 завершил работу успешно | %s | %s | стиль=%s",
             profile["name"],
             topic,
+            VISUAL_STYLE_PROFILES.get(visual_style, {}).get("name", visual_style),
         )
 
         return 0
