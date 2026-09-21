@@ -12,7 +12,7 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V8.8 — TELEGRAM CONTENT ENGINE
+# V8.9 — TELEGRAM CONTENT ENGINE
 # 7 форматов контента + анти-повтор тем и углов подачи + failover + Telegram HTML
 # ============================================================
 
@@ -59,7 +59,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v8.8")
+log = logging.getLogger("autopost-v8.9")
 
 
 # ============================================================
@@ -532,6 +532,20 @@ FORMAT_PROFILES = {
     },
 }
 
+
+# ============================================================
+# ВИЗУАЛЬНАЯ СЕТКА ЛЕНТЫ V8.9
+# Чередуем фото и text-only, чтобы вся лента не выглядела одинаково.
+# ============================================================
+
+MEDIA_MODES = {
+    "photo": {"name": "Фото"},
+    "text": {"name": "Text-only"},
+}
+
+MEDIA_SCHEDULE_A = ["photo", "photo", "text", "photo", "text", "photo", "text"]
+MEDIA_SCHEDULE_B = ["text", "photo", "photo", "text", "photo", "text", "photo"]
+
 # ============================================================
 # ИСТОРИЯ
 # ============================================================
@@ -905,6 +919,7 @@ def record_success(
     style_variant,
     content_angle,
     visual_style,
+    media_mode,
 ):
     items = load_history()
 
@@ -915,6 +930,7 @@ def record_success(
         "style_variant": style_variant,
         "content_angle": content_angle,
         "visual_style": visual_style,
+        "media_mode": media_mode,
         "model": model,
         "published_at": datetime.now(timezone.utc).isoformat(),
         "fingerprint": normalize_topic(text)[:500],
@@ -1701,7 +1717,11 @@ def local_fallback(topic, content_format):
 # UNSPLASH
 # ============================================================
 
-def get_unsplash_photo(rubric, content_format):
+def get_unsplash_photo(rubric, content_format, visual_style="", media_mode="photo"):
+    if media_mode != "photo":
+        log.info("📰 Медиа-режим: text-only | стиль=%s", visual_style or "default")
+        return None
+
     if not UNSPLASH_ACCESS_KEY:
         log.warning("⚠️ UNSPLASH_ACCESS_KEY не задан")
         return None
@@ -1712,7 +1732,15 @@ def get_unsplash_photo(rubric, content_format):
         ["leadership business", "business team"],
     )
 
-    query = random.choice(queries)
+    visual_queries = {
+        "quote_open": ["manager employee conversation", "executive speaking team", "business conversation"],
+        "dialogue_open": ["manager employee conversation", "business discussion people", "team conversation office"],
+        "minimal": ["executive desk notebook", "minimal office desk", "business workspace"],
+        "checklist": ["business planning notebook", "project checklist office", "planning desk"],
+        "contrast": ["business team meeting", "executive decision meeting", "office discussion"],
+        "question_open": ["executive thinking office", "manager reflection", "business leadership portrait"],
+    }
+    query = random.choice(visual_queries.get(visual_style) or queries)
 
     url = "https://api.unsplash.com/photos/random"
     params = {
@@ -1908,7 +1936,7 @@ def persist_history_to_git():
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM CONTENT ENGINE V8.8")
+    print("🚀 TELEGRAM CONTENT ENGINE V8.9")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1983,6 +2011,16 @@ def main():
         content_format,
     )
 
+    week_number = now.isocalendar().week
+    media_schedule = MEDIA_SCHEDULE_A if week_number % 2 else MEDIA_SCHEDULE_B
+    media_mode = media_schedule[weekday]
+
+    log.info(
+        "📰 Медиа-режим: %s | неделя=%s",
+        MEDIA_MODES[media_mode]["name"],
+        week_number,
+    )
+
     generated, model = generate_with_failover(
         topic,
         rubric,
@@ -2017,6 +2055,8 @@ def main():
     image = get_unsplash_photo(
         rubric,
         content_format,
+        visual_style=visual_style,
+        media_mode=media_mode,
     )
 
     if publish(caption, image):
@@ -2029,14 +2069,16 @@ def main():
             style_variant,
             content_angle,
             visual_style,
+            media_mode,
         )
         persist_history_to_git()
 
         log.info(
-            "🎉 V8.8 завершил работу успешно | %s | %s | стиль=%s",
+            "🎉 V8.9 завершил работу успешно | %s | %s | стиль=%s | медиа=%s",
             profile["name"],
             topic,
             VISUAL_STYLE_PROFILES.get(visual_style, {}).get("name", visual_style),
+            MEDIA_MODES[media_mode]["name"],
         )
 
         return 0
