@@ -12,7 +12,7 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V8.7 — TELEGRAM CONTENT ENGINE
+# V8.8 — TELEGRAM CONTENT ENGINE
 # 7 форматов контента + анти-повтор тем и углов подачи + failover + Telegram HTML
 # ============================================================
 
@@ -59,7 +59,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v8.7")
+log = logging.getLogger("autopost-v8.8")
 
 
 # ============================================================
@@ -294,6 +294,50 @@ CONTENT_ANGLES = {
         "через изменение самостоятельности команды",
         "через один управленческий вывод недели",
     ],
+}
+
+
+# ============================================================
+# ВИЗУАЛЬНЫЕ СТИЛИ V8.8
+# Формат отвечает за СОДЕРЖАНИЕ, а visual_style — за ВНЕШНИЙ ВИД.
+# ============================================================
+
+VISUAL_STYLE_PROFILES = {
+    "classic": {
+        "name": "Классический",
+        "instruction": "Начни с короткого смыслового заголовка. Используй 3–5 компактных смысловых блоков с умеренными эмодзи.",
+        "emoji_range": (3, 5),
+    },
+    "question_open": {
+        "name": "Вопрос с открытия",
+        "instruction": "Открой пост одним сильным вопросом к руководителю. Не начинай с обычного заголовка. Ответ раскрой в следующих абзацах.",
+        "emoji_range": (2, 4),
+    },
+    "quote_open": {
+        "name": "Фраза руководителя",
+        "instruction": "Открой пост короткой реалистичной фразой руководителя в кавычках. Затем объясни управленческую проблему за этой фразой.",
+        "emoji_range": (2, 4),
+    },
+    "contrast": {
+        "name": "Контраст",
+        "instruction": "Построй визуальный ритм на контрасте: ❌ привычная реакция / ✅ более продуктивная реакция. Не превращай весь текст в список.",
+        "emoji_range": (3, 6),
+    },
+    "checklist": {
+        "name": "Чек-лист",
+        "instruction": "Сделай пост визуально компактным: короткие строки, чек-пункты и один практический вывод. Не используй длинные абзацы.",
+        "emoji_range": (3, 6),
+    },
+    "dialogue_open": {
+        "name": "Диалог",
+        "instruction": "Начни с 2 коротких реплик руководителя и сотрудника. Затем выйди из диалога в объяснение управленческого механизма. Не превращай пост в сценку.",
+        "emoji_range": (2, 4),
+    },
+    "minimal": {
+        "name": "Минимализм",
+        "instruction": "Используй минимум визуальных маркеров. Короткие абзацы, максимум 2–3 эмодзи на весь пост. Текст должен выглядеть спокойно и профессионально.",
+        "emoji_range": (1, 3),
+    },
 }
 
 
@@ -754,6 +798,44 @@ def choose_topic(candidates, rubric):
     return selected["topic"]
 
 
+def choose_visual_style(topic, content_format):
+    """Выбирает визуальный стиль с защитой от недавнего повторения."""
+    history = recent_history()
+    scored = []
+
+    for style_key, profile in VISUAL_STYLE_PROFILES.items():
+        penalty = 0
+        recent_same_style = 0
+
+        for item in history:
+            if item.get("visual_style", "") != style_key:
+                continue
+
+            recent_same_style += 1
+            topic_sim = similarity_percent(topic, item.get("topic", ""))
+            old_format = item.get("content_format", "")
+
+            if topic_sim >= 55 and old_format == content_format:
+                penalty += 90
+            elif topic_sim >= 35:
+                penalty += 45
+            else:
+                penalty += 8
+
+        penalty += min(recent_same_style * 4, 16)
+        scored.append((penalty, style_key, profile))
+
+    best_penalty = min(item[0] for item in scored)
+    best = [item for item in scored if item[0] == best_penalty]
+    selected = random.choice(best)
+
+    log.info(
+        "🎨 Визуальный стиль: %s | key=%s | penalty=%s",
+        selected[2]["name"], selected[1], selected[0],
+    )
+    return selected[1]
+
+
 def choose_content_angle(topic, content_format):
     """
     Выбирает угол подачи отдельно от темы.
@@ -811,6 +893,7 @@ def record_success(
     content_format,
     style_variant,
     content_angle,
+    visual_style,
 ):
     items = load_history()
 
@@ -820,6 +903,7 @@ def record_success(
         "content_format": content_format,
         "style_variant": style_variant,
         "content_angle": content_angle,
+        "visual_style": visual_style,
         "model": model,
         "published_at": datetime.now(timezone.utc).isoformat(),
         "fingerprint": normalize_topic(text)[:500],
@@ -1003,10 +1087,11 @@ def valid_basic_html(text):
 # GEMINI
 # ============================================================
 
-def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="", repair=False):
+def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="", visual_style="", repair=False):
     profile = FORMAT_PROFILES[content_format]
+    visual_profile = VISUAL_STYLE_PROFILES.get(visual_style, VISUAL_STYLE_PROFILES["classic"])
     min_chars, max_chars = profile["range"]
-    emoji_min, emoji_max = profile["emoji_range"]
+    emoji_min, emoji_max = visual_profile["emoji_range"]
 
     style_variants = [
         "Начни максимально прямо: первая строка должна сразу зацепить знакомой руководителю ситуацией.",
@@ -1031,6 +1116,8 @@ def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="
 Тема: {topic}
 Редакционный формат: {profile["name"]}
 Угол подачи: {content_angle}
+Визуальный стиль: {visual_profile["name"]}
+Инструкция по визуальному стилю: {visual_profile["instruction"]}
 
 {profile["instruction"]}
 
@@ -1403,7 +1490,7 @@ def score_post(text, topic, content_format):
     return min(score, 100), reasons
 
 
-def generate_with_failover(topic, rubric, content_format, style_variant=0, content_angle=""):
+def generate_with_failover(topic, rubric, content_format, style_variant=0, content_angle="", visual_style=""):
     profile = FORMAT_PROFILES[content_format]
 
     for model in GEMINI_MODELS:
@@ -1417,6 +1504,7 @@ def generate_with_failover(topic, rubric, content_format, style_variant=0, conte
                 content_format,
                 style_variant=style_variant,
                 content_angle=content_angle,
+                visual_style=visual_style,
                 repair=repair,
             )
 
@@ -1809,7 +1897,7 @@ def persist_history_to_git():
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM CONTENT ENGINE V8.7")
+    print("🚀 TELEGRAM CONTENT ENGINE V8.8")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1879,12 +1967,18 @@ def main():
         content_format,
     )
 
+    visual_style = choose_visual_style(
+        topic,
+        content_format,
+    )
+
     generated, model = generate_with_failover(
         topic,
         rubric,
         content_format,
         style_variant=style_variant,
         content_angle=content_angle,
+        visual_style=visual_style,
     )
 
     if generated:
@@ -1923,11 +2017,12 @@ def main():
             content_format,
             style_variant,
             content_angle,
+            visual_style,
         )
         persist_history_to_git()
 
         log.info(
-            "🎉 V8.7 завершил работу успешно | %s | %s",
+            "🎉 V8.8 завершил работу успешно | %s | %s | стиль=%s",
             profile["name"],
             topic,
         )
