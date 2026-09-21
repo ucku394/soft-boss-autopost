@@ -46,17 +46,18 @@ jobs:
           GEMINI_MODEL: gemini-3.6-flash
         run: python autopost.py
 
-      - name: Save content history
+      - name: Save topic history
         if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add content_history.json
+          # autopost.py записывает историю именно в topics_history.json
+          git add topics_history.json
 
           if git diff --cached --quiet; then
             echo "История не изменилась, коммитить нечего"
           else
-            git commit -m "chore: update content history [skip ci]"
+            git commit -m "chore: update topic history [skip ci]"
             git push origin HEAD:${{ github.event.repository.default_branch }}
           fi
