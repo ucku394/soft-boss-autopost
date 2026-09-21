@@ -12,8 +12,8 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V8.5 — TELEGRAM CONTENT ENGINE
-# 7 форматов контента + форматная проверка + анти-повтор + failover + Telegram HTML
+# V8.6 — TELEGRAM CONTENT ENGINE
+# 7 форматов контента + усиленный анти-повтор смысловых углов + failover + Telegram HTML
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -59,7 +59,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v8.5")
+log = logging.getLogger("autopost-v8.6")
 
 
 # ============================================================
@@ -490,10 +490,18 @@ def normalize_topic(text):
 
 
 def tokens(text):
+    # Убираем не только служебные слова, но и слова-контексты,
+    # которые встречаются почти в каждом посте. Иначе темы про
+    # «руководителя / сотрудника / команду» получают искусственно
+    # высокое сходство.
     stop = {
         "как", "что", "это", "для", "при", "если", "или", "из",
         "не", "и", "в", "на", "с", "по", "к", "у", "о", "а", "то",
-        "же",
+        "же", "бы", "ли", "до", "за", "от", "под", "над",
+        "руководитель", "руководителя", "руководителю", "руководителем",
+        "сотрудник", "сотрудника", "сотруднику", "сотрудником",
+        "команда", "команды", "команде", "командой",
+        "работа", "работы", "работу", "рабочий", "рабочая",
     }
 
     return {
@@ -536,6 +544,53 @@ def recent_history():
     return result
 
 
+def topic_recency_penalty(topic, history, rubric):
+    """
+    Дополнительная защита от повторения одного управленческого угла.
+
+    Сравниваем новую тему не только с заголовком старой публикации,
+    но и с сохранённым fingerprint текста. Это помогает ловить случаи,
+    когда заголовки разные, а содержание фактически вращается вокруг
+    одной и той же мысли.
+    """
+    best_topic_sim = 0
+    best_body_sim = 0
+    recent_rubric_items = 0
+
+    for item in history:
+        if item.get("rubric", "") != rubric:
+            continue
+
+        recent_rubric_items += 1
+
+        old_topic = item.get("topic", "")
+        old_body = item.get("fingerprint", "")
+
+        best_topic_sim = max(
+            best_topic_sim,
+            similarity_percent(topic, old_topic),
+        )
+
+        if old_body:
+            best_body_sim = max(
+                best_body_sim,
+                similarity_percent(topic, old_body),
+            )
+
+    # Заголовок важнее fingerprint: fingerprint может содержать
+    # много общих слов. Но body-сходство помогает ловить близкий угол.
+    weighted_similarity = round(
+        best_topic_sim * 0.70 + best_body_sim * 0.30
+    )
+
+    return (
+        best_topic_sim,
+        best_body_sim,
+        weighted_similarity,
+        recent_rubric_items,
+    )
+
+
 def choose_topic(candidates, rubric):
     history = recent_history()
 
@@ -553,44 +608,97 @@ def choose_topic(candidates, rubric):
     scored = []
 
     for topic in candidates:
-        max_sim = 0
+        (
+            topic_sim,
+            body_sim,
+            weighted_sim,
+            same_rubric_count,
+        ) = topic_recency_penalty(
+            topic,
+            history,
+            rubric,
+        )
 
-        for item in history:
-            old_topic = item.get("topic", "")
-            sim = similarity_percent(topic, old_topic)
-            max_sim = max(max_sim, sim)
-
-        # Небольшой бонус темам, которые давно не использовались.
+        # Баланс рубрик остаётся мягким: нельзя отказываться от
+        # понедельничной рубрики только потому, что она выходит каждую неделю.
         rubric_load = rubric_counts.get(rubric, 0)
-        balance_penalty = min(rubric_load * 4, 20)
+        balance_penalty = min(rubric_load * 2, 10)
 
-        # Жёстко отодвигаем повторные и близкие темы.
-        repeat_penalty = 100 if max_sim >= 60 else (40 if max_sim >= 40 else 0)
-        score = max_sim + balance_penalty + repeat_penalty
+        # Повтор одного смыслового угла должен стоить дороже,
+        # чем простое совпадение слова в заголовке.
+        if weighted_sim >= 65:
+            repeat_penalty = 120
+        elif weighted_sim >= 50:
+            repeat_penalty = 65
+        elif weighted_sim >= 38:
+            repeat_penalty = 25
+        else:
+            repeat_penalty = 0
 
-        scored.append((score, max_sim, topic))
+        # Если тема почти совпадает с недавней — практически блокируем её.
+        exact_penalty = 80 if topic_sim >= 75 else 0
+
+        score = (
+            weighted_sim
+            + repeat_penalty
+            + exact_penalty
+            + balance_penalty
+        )
+
+        scored.append({
+            "score": score,
+            "topic_sim": topic_sim,
+            "body_sim": body_sim,
+            "weighted_sim": weighted_sim,
+            "topic": topic,
+        })
 
         log.info(
-            "🔎 Локальная проверка: %s → сходство %s%% | нагрузка рубрики %s | score %s",
+            "🔎 Тема: %s | заголовок %s%% | текст %s%% | "
+            "взвешенное %s%% | рубрика %s | score %s",
             topic,
-            max_sim,
-            rubric_load,
+            topic_sim,
+            body_sim,
+            weighted_sim,
+            same_rubric_count,
             score,
         )
 
-    acceptable = [item for item in scored if item[1] < 35]
+    # Сначала стараемся брать темы без заметного смыслового пересечения.
+    acceptable = [
+        item for item in scored
+        if item["weighted_sim"] < 38
+        and item["topic_sim"] < 75
+    ]
 
     pool = acceptable if acceptable else scored
-    selected = min(pool, key=lambda x: x[0])
 
-    log.info(
-        "✅ Выбрана тема: %s | сходство: %s%% | score: %s",
-        selected[2],
-        selected[1],
-        selected[0],
+    # Не всегда берём математически первый минимум.
+    # Небольшая случайность среди лучших тем предотвращает ситуацию,
+    # когда один и тот же кандидат регулярно выигрывает при равных score.
+    pool = sorted(
+        pool,
+        key=lambda item: (
+            item["score"],
+            item["weighted_sim"],
+            item["topic_sim"],
+        ),
     )
 
-    return selected[2]
+    shortlist = pool[:min(3, len(pool))]
+    selected = random.choice(shortlist)
+
+    log.info(
+        "✅ Выбрана тема: %s | заголовок %s%% | текст %s%% | "
+        "взвешенное %s%% | score %s",
+        selected["topic"],
+        selected["topic_sim"],
+        selected["body_sim"],
+        selected["weighted_sim"],
+        selected["score"],
+    )
+
+    return selected["topic"]
 
 
 def record_success(topic, rubric, model, text, content_format, style_variant):
@@ -1588,7 +1696,7 @@ def persist_history_to_git():
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM CONTENT ENGINE V8.5")
+    print("🚀 TELEGRAM CONTENT ENGINE V8.6")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1699,7 +1807,7 @@ def main():
         persist_history_to_git()
 
         log.info(
-            "🎉 V8.5 завершил работу успешно | %s | %s",
+            "🎉 V8.6 завершил работу успешно | %s | %s",
             profile["name"],
             topic,
         )
