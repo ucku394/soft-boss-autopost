@@ -1572,27 +1572,15 @@ def publish(caption, image):
 
 
 def persist_history_to_git():
-    """Сохраняет topics_history.json в репозиторий GitHub Actions."""
-    if os.getenv("GITHUB_ACTIONS", "").lower() != "true":
-        return
-
-    import subprocess
-
-    try:
-        subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True, capture_output=True, text=True)
-        subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", HISTORY_FILE.name], check=True, capture_output=True, text=True)
-
-        check = subprocess.run(["git", "diff", "--cached", "--quiet"], capture_output=True)
-        if check.returncode == 0:
-            log.info("🧠 История не изменилась — commit не нужен")
-            return
-
-        subprocess.run(["git", "commit", "-m", "chore: update topic history"], check=True, capture_output=True, text=True)
-        subprocess.run(["git", "push"], check=True, capture_output=True, text=True)
-        log.info("💾 История тем сохранена в GitHub")
-    except Exception as exc:
-        log.error("❌ Не удалось сохранить историю в GitHub: %s", exc)
+    """
+    История записывается в topics_history.json.
+    Commit/push выполняет GitHub Actions после успешной публикации.
+    Это исключает двойной commit/push из одного запуска.
+    """
+    if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+        log.info(
+            "💾 topics_history.json обновлён — GitHub Actions сохранит его после публикации"
+        )
 
 
 # ============================================================
