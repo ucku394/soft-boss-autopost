@@ -12,8 +12,8 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V8.4 — TELEGRAM CONTENT ENGINE
-# Отказоустойчивая генерация + контроль качества + баланс тем + безопасный Telegram HTML
+# V8.5 — TELEGRAM CONTENT ENGINE
+# 7 форматов контента + форматная проверка + анти-повтор + failover + Telegram HTML
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -28,7 +28,6 @@ HISTORY_FILE = BASE_DIR / "topics_history.json"
 
 PREFERRED_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 
-# Если GEMINI_MODEL задан, он идёт первым, но не является единственной моделью.
 GEMINI_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -49,7 +48,7 @@ TELEGRAM_TIMEOUT = 40
 UNSPLASH_TIMEOUT = 25
 
 HISTORY_WEEKS = 12
-MAX_CAPTION = 900  # запас до лимита Telegram caption 1024
+MAX_CAPTION = 900
 TELEGRAM_CAPTION_LIMIT = 1024
 MAX_GENERATED_CHARS = 900
 MAX_GENERATION_ATTEMPTS_PER_MODEL = 2
@@ -60,7 +59,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v8.2")
+log = logging.getLogger("autopost-v8.5")
 
 
 # ============================================================
@@ -231,6 +230,212 @@ IMAGE_QUERIES = {
 
 
 # ============================================================
+# ФОРМАТЫ КОНТЕНТА V8.5
+# Каждый день имеет свой редакционный формат, структуру и визуальный ритм.
+# ============================================================
+
+CONTENT_FORMATS = {
+    0: "management_breakdown",
+    1: "practical_tool",
+    2: "psychology_story",
+    3: "dialogue_case",
+    4: "management_mistake",
+    5: "mini_test",
+    6: "weekly_reflection",
+}
+
+FORMAT_PROFILES = {
+    "management_breakdown": {
+        "name": "Разбор управленческой ситуации",
+        "range": (500, 760),
+        "emoji_range": (3, 5),
+        "instruction": """
+ФОРМАТ: РАЗБОР УПРАВЛЕНЧЕСКОЙ СИТУАЦИИ.
+Структура:
+🎯 Короткий заголовок.
+Сразу опиши знакомую проблему руководителя в 1–2 предложениях.
+
+🔎 Что происходит.
+Объясни причину без теории и общих слов.
+
+🛠 Что делать.
+Дай ровно 3 конкретных действия. Каждый пункт — отдельная строка.
+
+⚠️ Где легко ошибиться.
+Одна короткая оговорка.
+
+👉 Финальный вывод и один естественный вопрос читателю.
+""",
+        "cta": "естественный вопрос по теме",
+        "image_queries": [
+            "business leader meeting team",
+            "executive leadership team",
+            "manager talking employee",
+        ],
+        "hashtags": "#лидерство #руководитель #команда",
+    },
+    "practical_tool": {
+        "name": "Практический инструмент",
+        "range": (480, 780),
+        "emoji_range": (3, 6),
+        "instruction": """
+ФОРМАТ: ПРАКТИЧЕСКИЙ ИНСТРУМЕНТ.
+Дай инструмент, который руководитель может применить сегодня.
+
+Структура:
+🛠 Название инструмента.
+Когда его применять — 1 короткое предложение.
+
+Пошаговое применение:
+1️⃣ ...
+2️⃣ ...
+3️⃣ ...
+4️⃣ ... (если действительно нужно)
+
+💬 Дай одну готовую фразу, которую руководитель может сказать сотруднику.
+
+⚠️ Короткая оговорка: когда этот инструмент лучше не применять.
+Финальная строка — практический вывод без обязательного вопроса.
+""",
+        "cta": "короткий практический вывод",
+        "image_queries": [
+            "business planning desk",
+            "project planning meeting",
+            "manager writing notes",
+        ],
+        "hashtags": "#управление #инструмент #руководитель",
+    },
+    "psychology_story": {
+        "name": "Психологическая мини-история",
+        "range": (480, 780),
+        "emoji_range": (2, 4),
+        "instruction": """
+ФОРМАТ: ПСИХОЛОГИЧЕСКАЯ МИНИ-ИСТОРИЯ.
+Начни с короткой узнаваемой сцены из жизни руководителя.
+
+Не используй заголовки «Главная мысль» и «Что сделать».
+Покажи:
+— что сделал руководитель;
+— что он на самом деле пытался решить;
+— почему его реакция могла усилить проблему;
+— что можно сделать иначе.
+
+Финал — одна спокойная практическая мысль.
+Можно закончить вопросом для самоанализа.
+""",
+        "cta": "вопрос для самоанализа или спокойный вывод",
+        "image_queries": [
+            "business executive thinking",
+            "manager reflection office",
+            "leadership stress office",
+        ],
+        "hashtags": "#психология #руководитель #лидерство",
+    },
+    "dialogue_case": {
+        "name": "Диалог и разбор кейса",
+        "range": (500, 800),
+        "emoji_range": (2, 4),
+        "instruction": """
+ФОРМАТ: ДИАЛОГ И РАЗБОР КЕЙСА.
+Построй начало как короткий реалистичный диалог руководителя и сотрудника.
+
+Используй 2–4 реплики:
+— Сотрудник: «...»
+— Руководитель: «...»
+
+Затем покажи:
+❌ что в такой реакции руководителя не сработало;
+✅ как можно ответить конструктивнее.
+
+В конце объясни принцип в 2–3 коротких предложениях.
+Не превращай пост в театральную сценку.
+""",
+        "cta": "короткий вопрос: как бы вы ответили?",
+        "image_queries": [
+            "manager employee conversation",
+            "business conflict meeting",
+            "team discussion office",
+        ],
+        "hashtags": "#кейс #управление #команда",
+    },
+    "management_mistake": {
+        "name": "Ошибка руководителя",
+        "range": (480, 760),
+        "emoji_range": (3, 5),
+        "instruction": """
+ФОРМАТ: ОШИБКА РУКОВОДИТЕЛЯ.
+Начни с фразы «Одна из частых ошибок руководителя...», но не обязательно дословно.
+
+Покажи:
+❌ какая ошибка;
+🤔 почему она кажется логичной;
+⚠️ к чему она приводит;
+✅ что делать вместо неё.
+
+Не обвиняй руководителя. Объясняй механизм проблемы.
+Финал — одна короткая фраза, которую стоит запомнить.
+""",
+        "cta": "короткая фраза-вывод",
+        "image_queries": [
+            "business decision meeting",
+            "executive decision office",
+            "business problem solving",
+        ],
+        "hashtags": "#ошибки #руководитель #управление",
+    },
+    "mini_test": {
+        "name": "Мини-тест",
+        "range": (480, 760),
+        "emoji_range": (4, 8),
+        "instruction": """
+ФОРМАТ: МИНИ-ТЕСТ.
+Сделай пост интерактивным.
+
+Начни с короткого заголовка и предложи читателю ответить на 3–5 вопросов.
+Каждый вопрос должен быть отдельной строкой и иметь вариант «да/нет» или понятный выбор.
+
+После вопросов дай простую расшифровку:
+— если большинство ответов «да» — что это может означать;
+— если большинство «нет» — на что обратить внимание.
+
+Не ставь диагнозов и не используй псевдонаучные утверждения.
+Финал — предложение написать результат или подумать над одним вопросом.
+""",
+        "cta": "предложение проверить себя или написать результат",
+        "image_queries": [
+            "modern office team",
+            "business coffee meeting",
+            "creative team office",
+        ],
+        "hashtags": "#мини-тест #руководитель #команда",
+    },
+    "weekly_reflection": {
+        "name": "Недельная рефлексия",
+        "range": (400, 650),
+        "emoji_range": (1, 3),
+        "instruction": """
+ФОРМАТ: НЕДЕЛЬНАЯ РЕФЛЕКСИЯ.
+Это спокойный воскресный пост.
+
+Не используй нумерованный список и много подзаголовков.
+Напиши короткую мысль о прошедшей неделе руководителя.
+Задай 1 сильный вопрос для размышления.
+Предложи одно небольшое действие на следующую неделю.
+
+Тон: спокойный, взрослый, без мотивационных лозунгов.
+Пост должен ощущаться как пауза, а не как инструкция.
+""",
+        "cta": "один вопрос для личной рефлексии",
+        "image_queries": [
+            "business planning week",
+            "executive desk notebook",
+            "leadership reflection",
+        ],
+        "hashtags": "#рефлексия #руководитель #лидерство",
+    },
+}
+
+# ============================================================
 # ИСТОРИЯ
 # ============================================================
 
@@ -388,12 +593,14 @@ def choose_topic(candidates, rubric):
     return selected[2]
 
 
-def record_success(topic, rubric, model, text):
+def record_success(topic, rubric, model, text, content_format, style_variant):
     items = load_history()
 
     items.append({
         "topic": topic,
         "rubric": rubric,
+        "content_format": content_format,
+        "style_variant": style_variant,
         "model": model,
         "published_at": datetime.now(timezone.utc).isoformat(),
         "fingerprint": normalize_topic(text)[:300],
@@ -577,65 +784,73 @@ def valid_basic_html(text):
 # GEMINI
 # ============================================================
 
-def build_prompt(topic, rubric, repair=False):
+def build_prompt(topic, rubric, content_format, style_variant=0, repair=False):
+    profile = FORMAT_PROFILES[content_format]
+    min_chars, max_chars = profile["range"]
+    emoji_min, emoji_max = profile["emoji_range"]
+
+    style_variants = [
+        "Начни максимально прямо: первая строка должна сразу зацепить знакомой руководителю ситуацией.",
+        "Начни с короткого наблюдения, которое руководитель легко узнает по своей работе.",
+        "Начни с неожиданного, но практичного вопроса или противопоставления.",
+    ]
+    opening_style = style_variants[style_variant % len(style_variants)]
+
+    repair_text = """
+Это повторная попытка. Исправь типичные проблемы:
+— не обрывай текст;
+— строго соблюдай выбранный формат;
+— уложись в допустимый объём;
+— не повторяй одну мысль;
+— убери лишние вводные фразы;
+— сохрани законченный финал и хэштеги.
+""" if repair else ""
+
     return f"""
 Ты — главный редактор Telegram-канала «Лидерство без выгорания».
 Рубрика: {rubric}
 Тема: {topic}
+Редакционный формат: {profile["name"]}
 
-Создай один законченный Telegram-пост для руководителей.
+{profile["instruction"]}
 
-СТИЛЬ — ЭТО ГЛАВНОЕ:
-- Пиши так, будто опытный руководитель спокойно объясняет тему коллеге за чашкой кофе.
-- Используй простые, обычные слова.
-- Не пытайся звучать умнее, чем нужно.
-- Одно предложение — одна мысль.
-- Предложения преимущественно короткие: до 15–18 слов.
-- Если термин можно заменить обычным словом — замени.
-- Не используй канцелярит, мотивационные клише и «бизнес-язык».
-- Не пиши: «В современном мире», «успешный руководитель должен»,
-  «ключевым фактором является», «данный подход позволяет», «синергия»,
-  «экосистема», «драйвер», «трансформация», «декомпозиция», «стейкхолдеры».
-- Не добавляй сложные выводы ради красивой формулировки.
-- Текст должен читаться легко с телефона.
+ОБЩИЙ СТИЛЬ:
+- Пиши как опытный руководитель, который спокойно объясняет тему коллеге.
+- Простые слова, короткие предложения, минимум теории.
+- Один абзац — одна мысль.
+- Текст должен легко читаться с телефона.
+- Не используй канцелярит, мотивационные клише и искусственный «бизнес-язык».
+- Не пиши: «В современном мире», «ключевым фактором является»,
+  «данный подход позволяет», «синергия», «экосистема», «драйвер»,
+  «трансформация», «декомпозиция», «стейкхолдеры».
+- Не выдумывай факты, цифры, исследования, цитаты или ссылки.
+- Не морализируй и не обвиняй сотрудников или руководителей.
+- {opening_style}
 
-СТРУКТУРА:
-🎯 <b>Короткий заголовок</b>
-2 коротких предложения: знакомая руководителю проблема или ситуация.
-
-💡 <b>Главная мысль</b>
-2–3 простых предложения по сути.
-
-🛠 <b>Что сделать</b>
-1️⃣ Конкретный шаг.
-2️⃣ Конкретный шаг.
-3️⃣ Конкретный шаг.
-
-⚠️ <b>Важно</b>
-Одна короткая практическая оговорка.
-
-👉 Короткий вывод и один естественный вопрос читателю.
-
-#лидерство #руководитель #команда
-
-ТРЕБОВАНИЯ:
-- 4–6 эмодзи, не больше.
-- Используй пустые строки между блоками.
+ВИЗУАЛЬНЫЙ РИТМ:
+- Используй {emoji_min}–{emoji_max} уместных эмодзи.
+- Не ставь эмодзи в каждой строке.
+- Используй пустые строки между смысловыми блоками.
 - Не делай длинных абзацев.
-- Целевой объём: 500–700 символов.
-- Допустимый объём: 450–780 символов.
-- Абсолютный максимум: 850 символов.
-- Не придумывай факты, цифры, исследования или ссылки.
-- Не повторяй одну мысль разными словами.
-- Не используй Markdown. Разрешён только Telegram HTML: <b>...</b> и <i>...</i>.
-- В конце поста обязательно должны быть 2–4 хэштега.
-- Пост должен заканчиваться законченным предложением или вопросом перед хэштегами.
+- Не используй Markdown.
+- Разрешён только Telegram HTML: <b>...</b> и <i>...</i>.
+- Не используй HTML-теги для оформления списков.
+- В конце обязательно добавь именно этот блок хэштегов:
+{profile["hashtags"]}
 
-Если это повторная попытка генерации (repair=True), исправь типичные проблемы предыдущего варианта: не обрывай текст, соблюдай объём 450–780 символов, закончи мысль и обязательно добавь 2–4 хэштега.
+ОБЪЁМ:
+- Целевой диапазон: {min_chars}–{max_chars} символов.
+- Абсолютный максимум: {MAX_CAPTION} символов.
 
-Верни только готовый пост без пояснений редактора.
+ФИНАЛ:
+- Заверши мысль до блока хэштегов.
+- Тип финала: {profile["cta"]}.
+- Не добавляй подпись автора, пояснение редактора или служебный текст.
+
+{repair_text}
+
+Верни только готовый пост.
 """
-
 
 def gemini_request(model, prompt):
     url = (
@@ -722,18 +937,19 @@ def last_content_line(text):
     return lines[-1] if lines else ""
 
 
-def looks_like_complete_post(text, finish_reason=""):
-    """Проверяет завершённость поста, не считая хэштеги финальным предложением."""
+def looks_like_complete_post(text, finish_reason="", content_format="management_breakdown"):
+    """Проверяет завершённость поста с учётом длины конкретного формата."""
     if not text:
         return False
 
     clean = sanitize_telegram_html(text)
     plain = strip_html(clean).strip()
+    min_chars, max_chars = FORMAT_PROFILES[content_format]["range"]
 
     if finish_reason.upper() in {"MAX_TOKENS", "LENGTH"}:
         return False
 
-    if len(plain) < 430 or len(plain) > MAX_CAPTION:
+    if len(plain) < max(350, min_chars - 50) or len(plain) > MAX_CAPTION:
         return False
 
     body, hashtags = split_hashtags(clean)
@@ -749,6 +965,10 @@ def looks_like_complete_post(text, finish_reason=""):
         return False
 
     if not re.search(r"[.!?)]$", content_last):
+        return False
+
+    # Не принимаем пост, если он явно вышел за целевой максимум формата.
+    if len(plain) > max_chars + 100:
         return False
 
     return True
@@ -828,67 +1048,124 @@ def simplicity_score(text):
     return max(0, min(30, score))
 
 
-def score_post(text, topic):
-    """Локальная оценка качества без дополнительного AI-запроса."""
+def format_quality_score(text, content_format):
+    clean = sanitize_telegram_html(text)
+    body, _ = split_hashtags(clean)
+    low = body.lower()
+    score = 0
+    reasons = []
+
+    if content_format == "management_breakdown":
+        if re.search(r"\n(?:🛠|🔎|⚠️|👉)", body):
+            score += 5
+        if len(re.findall(r"(?m)^\s*\d+[️⃣.]?\s+", body)) >= 3:
+            score += 8
+        else:
+            reasons.append("разбор без трёх конкретных действий")
+
+    elif content_format == "practical_tool":
+        numbered = len(re.findall(r"(?m)^\s*\d+[️⃣.]?\s+", body))
+        if numbered >= 3:
+            score += 10
+        else:
+            reasons.append("инструмент должен содержать пошаговое применение")
+        if "«" in body or '"' in body:
+            score += 5
+
+    elif content_format == "psychology_story":
+        if any(x in low for x in ["он ", "она ", "руководитель", "ситуац"]):
+            score += 5
+        if "почему" in low or "на самом деле" in low:
+            score += 5
+        if not re.search(r"(?m)^\s*(?:🛠|💡)\s*<b>", body):
+            score += 3
+
+    elif content_format == "dialogue_case":
+        dialogue_lines = len(re.findall(r"(?m)^\s*[—-]\s*(?:сотрудник|руководитель)\s*:", body, re.I))
+        if dialogue_lines >= 2:
+            score += 10
+        else:
+            reasons.append("нет реалистичного диалога")
+        if "❌" in body and "✅" in body:
+            score += 5
+
+    elif content_format == "management_mistake":
+        if "❌" in body:
+            score += 4
+        if "🤔" in body:
+            score += 4
+        if "✅" in body:
+            score += 4
+        if not any(x in low for x in ["ошиб", "вместо", "приводит"]):
+            reasons.append("слабо раскрыта сама ошибка")
+
+    elif content_format == "mini_test":
+        questions = len(re.findall(r"(?m)^\s*(?:\d+[.)️⃣]?|❓)\s+", body))
+        if questions >= 3:
+            score += 10
+        else:
+            reasons.append("мини-тест должен содержать минимум 3 вопроса")
+        if "если" in low and ("да" in low or "нет" in low):
+            score += 5
+
+    elif content_format == "weekly_reflection":
+        numbered = len(re.findall(r"(?m)^\s*\d+[️⃣.]?\s+", body))
+        if numbered == 0:
+            score += 6
+        else:
+            reasons.append("рефлексия не должна превращаться в список")
+        if body.count("?") >= 1:
+            score += 6
+
+    return min(score, 18), reasons
+
+
+def score_post(text, topic, content_format):
+    """Локальная оценка качества с учётом конкретного формата."""
     clean = sanitize_telegram_html(text)
     plain = strip_html(clean).strip()
     body, hashtags = split_hashtags(clean)
+    profile = FORMAT_PROFILES[content_format]
+    min_chars, max_chars = profile["range"]
 
     score = 0
     reasons = []
 
     visual = formatting_score(clean)
-    score += visual
-    if visual < 14:
-        reasons.append("слабое визуальное оформление")
+    score += min(20, visual)
+
+    simplicity = simplicity_score(body)
+    score += round(simplicity * 0.35)
 
     length = len(plain)
-    if 500 <= length <= 900:
-        score += 20
-    elif 430 <= length <= 1024:
-        score += 14
+    if min_chars <= length <= max_chars:
+        score += 18
+    elif min_chars - 50 <= length <= max_chars + 60:
+        score += 11
     else:
-        score += 5
         reasons.append("неоптимальная длина")
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
-    if len(paragraphs) >= 4:
-        score += 15
-    elif len(paragraphs) >= 3:
+    if 3 <= len(paragraphs) <= 7:
         score += 10
+    elif len(paragraphs) >= 2:
+        score += 6
     else:
-        reasons.append("мало абзацев")
-
-    practical_words = {
-        "шаг", "вопрос", "алгоритм", "проверьте", "сначала", "затем",
-        "попробуйте", "сформулируйте", "задайте", "определите", "действие",
-        "правило", "приём", "инструмент", "сделайте", "договоритесь",
-    }
-
-    low = body.lower()
-    practical_hits = sum(1 for w in practical_words if w in low)
-
-    if practical_hits >= 3:
-        score += 20
-    elif practical_hits >= 1:
-        score += 12
-    else:
-        score += 5
-        reasons.append("мало практической конкретики")
+        reasons.append("мало смысловых блоков")
 
     if hashtags:
-        score += 10
+        score += 8
     else:
         reasons.append("нет хэштегов")
 
     content_last = last_content_line(clean)
     if re.search(r"[.!?)]$", content_last):
-        score += 10
+        score += 8
     else:
         reasons.append("нет нормального завершения")
 
-    if any(x in low for x in ["руководитель", "сотрудник", "команда", "задач"]):
-        score += 10
+    if any(x in body.lower() for x in ["руководитель", "сотрудник", "команда", "задач"]):
+        score += 7
     else:
         reasons.append("слабая связь с управленческой темой")
 
@@ -899,19 +1176,28 @@ def score_post(text, topic):
     else:
         reasons.append("тема слабо отражена в тексте")
 
-    if re.search(r"(^|\n)[-•]", body):
-        score += 5
+    format_score, format_reasons = format_quality_score(clean, content_format)
+    score += format_score
+    reasons.extend(format_reasons)
 
     return min(score, 100), reasons
 
 
-def generate_with_failover(topic, rubric):
+def generate_with_failover(topic, rubric, content_format, style_variant=0):
+    profile = FORMAT_PROFILES[content_format]
+
     for model in GEMINI_MODELS:
-        log.info("🤖 Gemini генерация: %s", model)
+        log.info("🤖 Gemini генерация: %s | формат=%s", model, profile["name"])
 
         for attempt in range(1, MAX_GENERATION_ATTEMPTS_PER_MODEL + 1):
             repair = attempt > 1
-            prompt = build_prompt(topic, rubric, repair=repair)
+            prompt = build_prompt(
+                topic,
+                rubric,
+                content_format,
+                style_variant=style_variant,
+                repair=repair,
+            )
 
             try:
                 response = gemini_request(model, prompt)
@@ -928,10 +1214,20 @@ def generate_with_failover(topic, rubric):
                         len(strip_html(sanitize_telegram_html(text))) if text else 0,
                     )
 
-                    if text and looks_like_complete_post(text, finish_reason):
-                        quality, reasons = score_post(text, topic)
+                    if text and looks_like_complete_post(
+                        text,
+                        finish_reason,
+                        content_format,
+                    ):
+                        quality, reasons = score_post(
+                            text,
+                            topic,
+                            content_format,
+                        )
+
                         log.info(
-                            "🎨 Оформление: %s эмодзи | визуальный формат проверен",
+                            "🎨 Формат: %s | эмодзи=%s",
+                            profile["name"],
                             emoji_count(text),
                         )
                         log.info(
@@ -943,18 +1239,24 @@ def generate_with_failover(topic, rubric):
                         if quality >= QUALITY_THRESHOLD:
                             log.info(
                                 "✅ Gemini принят: %s | попытка %s | качество %s/100",
-                                model, attempt, quality,
+                                model,
+                                attempt,
+                                quality,
                             )
                             return text, model
 
                         log.warning(
                             "⚠️ Пост отклонён по качеству: %s/100 | порог %s",
-                            quality, QUALITY_THRESHOLD,
+                            quality,
+                            QUALITY_THRESHOLD,
                         )
                     else:
                         log.warning(
                             "⚠️ Ответ отклонён | %s | finishReason=%s | попытка %s/%s",
-                            model, finish_reason or "NONE", attempt, MAX_GENERATION_ATTEMPTS_PER_MODEL,
+                            model,
+                            finish_reason or "NONE",
+                            attempt,
+                            MAX_GENERATION_ATTEMPTS_PER_MODEL,
                         )
 
                     if attempt < MAX_GENERATION_ATTEMPTS_PER_MODEL:
@@ -964,7 +1266,10 @@ def generate_with_failover(topic, rubric):
                 if response.status_code in RETRYABLE_HTTP:
                     log.warning(
                         "⚠️ Gemini HTTP %s | %s | попытка %s/%s",
-                        response.status_code, model, attempt, MAX_GENERATION_ATTEMPTS_PER_MODEL,
+                        response.status_code,
+                        model,
+                        attempt,
+                        MAX_GENERATION_ATTEMPTS_PER_MODEL,
                     )
                     if attempt < MAX_GENERATION_ATTEMPTS_PER_MODEL:
                         delay = 2 + (2 ** (attempt - 1)) + random.uniform(0.5, 1.5)
@@ -973,14 +1278,19 @@ def generate_with_failover(topic, rubric):
 
                 log.error(
                     "❌ Gemini HTTP %s | %s: %s",
-                    response.status_code, model, response.text[:500],
+                    response.status_code,
+                    model,
+                    response.text[:500],
                 )
                 break
 
             except requests.RequestException as exc:
                 log.warning(
                     "⚠️ Сетевая ошибка Gemini | %s | попытка %s/%s: %s",
-                    model, attempt, MAX_GENERATION_ATTEMPTS_PER_MODEL, exc,
+                    model,
+                    attempt,
+                    MAX_GENERATION_ATTEMPTS_PER_MODEL,
+                    exc,
                 )
                 if attempt < MAX_GENERATION_ATTEMPTS_PER_MODEL:
                     time.sleep(2 + random.uniform(0.5, 1.5))
@@ -989,79 +1299,109 @@ def generate_with_failover(topic, rubric):
 
     return None, None
 
-
 # ============================================================
 # ЛОКАЛЬНЫЙ FALLBACK
 # ============================================================
 
-def local_fallback(topic):
-    templates = [
-        (
-            f"🎯 <b>{topic}</b>\n\n"
-            "💡 <b>Главная мысль</b>\n"
-            "Хорошая управленческая задача начинается не с контроля, а с понятного результата. "
-            "Сотрудник должен понимать, что именно считается выполненной работой.\n\n"
-            "🛠 <b>Что делать</b>\n"
+def local_fallback(topic, content_format):
+    if content_format == "practical_tool":
+        return (
+            f"🛠 <b>{topic}</b>\n\n"
+            "Если задача регулярно возвращается к руководителю, проверьте не сотрудника, а саму постановку.\n\n"
             "1️⃣ Назовите конкретный результат.\n"
             "2️⃣ Зафиксируйте срок.\n"
             "3️⃣ Определите границы самостоятельности.\n"
             "4️⃣ Договоритесь о точке контроля.\n\n"
-            "⚠️ <b>Важно</b>\n"
-            "Не подменяйте договорённость постоянными уточнениями.\n\n"
-            "👉 Чем чаще вам приходится напоминать о задаче, тем точнее стоит настроить её постановку.\n\n"
-            "#лидерство #управление #команда"
-        ),
-        (
-            f"🎯 <b>{topic}</b>\n\n"
-            "Ключевая проблема руководителя часто не в сотруднике, а в том, насколько ясно была поставлена задача.\n\n"
-            "💡 <b>Проверьте четыре вещи</b>\n"
-            "1️⃣ Что должно быть сделано?\n"
-            "2️⃣ К какому сроку?\n"
-            "3️⃣ Какие решения сотрудник принимает сам?\n"
-            "4️⃣ Когда нужен промежуточный контроль?\n\n"
-            "🛠 <b>Практика</b>\n"
-            "В конце постановки спросите: «Как ты понял задачу и какой будет первый шаг?»\n\n"
-            "👉 Этот вопрос часто полезнее ещё десяти инструкций.\n\n"
-            "#лидерство #руководитель #делегирование"
-        ),
-    ]
-    return random.choice(templates)
+            "💬 Полезная фраза: «Как ты понял результат и что сделаешь первым?»\n\n"
+            "👉 Хорошая постановка задачи часто убирает лишний контроль.\n\n"
+            "#управление #инструмент #руководитель"
+        )
 
+    if content_format == "mini_test":
+        return (
+            "🧪 <b>Мини-тест для руководителя</b>\n\n"
+            "❓ Команда часто ждёт вашего решения?\n"
+            "❓ Вы проверяете то, что уже поручили?\n"
+            "❓ Сотрудники редко предлагают свой вариант?\n\n"
+            "Если на два вопроса ответ «да», стоит посмотреть, где вы забираете у команды самостоятельность.\n\n"
+            "👉 Выберите один пункт и попробуйте изменить его на следующей неделе.\n\n"
+            "#мини-тест #руководитель #команда"
+        )
+
+    if content_format == "weekly_reflection":
+        return (
+            f"☕ <b>{topic}</b>\n\n"
+            "Неделя редко показывает качество управления только в отчётах. Иногда важнее посмотреть на разговоры, решения и то, что вы продолжаете делать сами.\n\n"
+            "Остановитесь на минуту и спросите себя: что из этого действительно нужно было решать лично вам?\n\n"
+            "👉 Одну такую задачу можно попробовать передать команде уже на следующей неделе.\n\n"
+            "#рефлексия #руководитель #лидерство"
+        )
+
+    if content_format == "dialogue_case":
+        return (
+            f"🎭 <b>{topic}</b>\n\n"
+            "— Сотрудник: «Я не успеваю».\n"
+            "— Руководитель: «Ты должен был предупредить раньше».\n\n"
+            "❌ Проблема здесь не только в сроке. Разговор сразу ушёл в поиск виноватого.\n\n"
+            "✅ Лучше спросить: «Что сейчас мешает закончить задачу и какой вариант ты предлагаешь?»\n\n"
+            "👉 Важен не только контроль результата, но и качество следующего действия.\n\n"
+            "#кейс #управление #команда"
+        )
+
+    if content_format == "management_mistake":
+        return (
+            f"⚠️ <b>{topic}</b>\n\n"
+            "❌ Руководитель пытается решить проблему усилением контроля.\n\n"
+            "🤔 Это кажется логичным: если что-то пошло не так, нужно чаще проверять.\n\n"
+            "Но постоянные проверки быстро забирают самостоятельность.\n\n"
+            "✅ Сначала уточните результат, ответственность и точку контроля.\n\n"
+            "👉 Контроль должен закрывать риск, а не заменять доверие.\n\n"
+            "#ошибки #руководитель #управление"
+        )
+
+    if content_format == "psychology_story":
+        return (
+            f"🧠 <b>{topic}</b>\n\n"
+            "После ошибки сотрудника руководителю захотелось проверить всё самому. Это знакомая реакция: хочется быстро вернуть ощущение контроля.\n\n"
+            "Но причина раздражения не всегда в работе сотрудника. Иногда руководитель просто пытается снизить собственную неопределённость.\n\n"
+            "👉 Перед новой проверкой спросите себя: какой риск я действительно сейчас контролирую?\n\n"
+            "#психология #руководитель #лидерство"
+        )
+
+    return (
+        f"🎯 <b>{topic}</b>\n\n"
+        "Управленческая проблема редко решается одним жёстким распоряжением. Сначала важно понять, где именно возник разрыв.\n\n"
+        "🔎 Что не совпало: результат, ответственность, срок или ожидания?\n\n"
+        "🛠 Назовите проблему прямо, договоритесь о следующем действии и зафиксируйте точку контроля.\n\n"
+        "👉 Чем точнее договорённость, тем меньше лишнего контроля.\n\n"
+        "#лидерство #руководитель #команда"
+    )
 
 # ============================================================
 # UNSPLASH
 # ============================================================
 
-def get_unsplash_photo(rubric):
+def get_unsplash_photo(rubric, content_format):
     if not UNSPLASH_ACCESS_KEY:
-        log.warning(
-            "⚠️ UNSPLASH_ACCESS_KEY не задан"
-        )
-
+        log.warning("⚠️ UNSPLASH_ACCESS_KEY не задан")
         return None
 
-    queries = IMAGE_QUERIES.get(
+    profile = FORMAT_PROFILES.get(content_format, {})
+    queries = profile.get("image_queries") or IMAGE_QUERIES.get(
         rubric,
-        [
-            "leadership business",
-            "business team",
-        ],
+        ["leadership business", "business team"],
     )
 
     query = random.choice(queries)
 
     url = "https://api.unsplash.com/photos/random"
-
     params = {
         "query": query,
         "orientation": "landscape",
         "content_filter": "high",
     }
-
     headers = {
-        "Authorization": (
-            f"Client-ID {UNSPLASH_ACCESS_KEY}"
-        ),
+        "Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}",
     }
 
     try:
@@ -1078,15 +1418,10 @@ def get_unsplash_photo(rubric):
                 response.status_code,
                 response.text[:300],
             )
-
             return None
 
         data = response.json()
-
-        image_url = (
-            data.get("urls", {})
-            .get("regular")
-        )
+        image_url = data.get("urls", {}).get("regular")
 
         if not image_url:
             return None
@@ -1099,32 +1434,26 @@ def get_unsplash_photo(rubric):
         if image.status_code != 200:
             return None
 
+        photo_id = data.get("id", "")
+
         log.info(
-            "🖼️ Unsplash: %s",
+            "🖼️ Unsplash: %s | photo_id=%s | формат=%s",
             query,
+            photo_id or "unknown",
+            FORMAT_PROFILES.get(content_format, {}).get("name", content_format),
         )
 
         return {
             "bytes": image.content,
-            "photo_url": (
-                data.get("links", {})
-                .get("html", "")
-            ),
-            "author": (
-                data.get("user", {})
-                .get("name", "Unsplash")
-            ),
+            "photo_url": data.get("links", {}).get("html", ""),
+            "author": data.get("user", {}).get("name", "Unsplash"),
             "query": query,
+            "photo_id": photo_id,
         }
 
     except requests.RequestException as exc:
-        log.warning(
-            "⚠️ Ошибка Unsplash: %s",
-            exc,
-        )
-
+        log.warning("⚠️ Ошибка Unsplash: %s", exc)
         return None
-
 
 # ============================================================
 # TELEGRAM
@@ -1271,7 +1600,7 @@ def persist_history_to_git():
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM CONTENT ENGINE V8.4")
+    print("🚀 TELEGRAM CONTENT ENGINE V8.5")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1305,29 +1634,33 @@ def main():
     weekday = now.weekday()
 
     day_data = THEMES[weekday]
-
     rubric = day_data["rubric"]
 
-    base_topic = random.choice(
-        day_data["topics"]
-    )
+    content_format = CONTENT_FORMATS[weekday]
+    profile = FORMAT_PROFILES[content_format]
+
+    # Меняем не смысл дня, а подачу внутри него.
+    # Номер недели слегка меняет открытие, поэтому одинаковый понедельник
+    # не выглядит визуально идентичным через неделю.
+    week_number = now.isocalendar().week
+    style_variant = week_number % 3
 
     log.info(
-        "🎯 Базовая тема дня: %s",
-        base_topic,
+        "📅 День недели: %s | рубрика: %s | формат: %s | вариант: %s",
+        weekday,
+        rubric,
+        profile["name"],
+        style_variant + 1,
     )
 
-    log.info(
-        "🗂️ Тем дня доступно: %s",
-        len(day_data["topics"]),
-    )
+    base_topic = random.choice(day_data["topics"])
+
+    log.info("🎯 Базовая тема дня: %s", base_topic)
+    log.info("🗂️ Тем дня доступно: %s", len(day_data["topics"]))
 
     topic = choose_topic(
-        [base_topic]
-        + [
-            x
-            for x in day_data["topics"]
-            if x != base_topic
+        [base_topic] + [
+            x for x in day_data["topics"] if x != base_topic
         ],
         rubric,
     )
@@ -1335,70 +1668,57 @@ def main():
     generated, model = generate_with_failover(
         topic,
         rubric,
+        content_format,
+        style_variant=style_variant,
     )
 
     if generated:
-        caption = sanitize_telegram_html(
-            generated
-        )
-
+        caption = sanitize_telegram_html(generated)
         fitted = fit_caption(caption)
 
         if not fitted:
             log.warning(
                 "🛟 Сгенерированный пост слишком длинный — используем локальный fallback"
             )
-            caption = local_fallback(topic)
+            caption = local_fallback(topic, content_format)
             model = "local-fallback"
         else:
             caption = fitted
 
-        log.info(
-            "🧠 Использована модель: %s",
-            model,
-        )
+        log.info("🧠 Использована модель: %s", model)
 
     else:
-        log.error(
-            "❌ Все Gemini-модели недоступны"
-        )
+        log.error("❌ Все Gemini-модели недоступны")
+        log.warning("🛟 Используем локальный fallback")
 
-        log.warning(
-            "🛟 Используем локальный fallback"
-        )
-
-        caption = local_fallback(
-            topic
-        )
-
+        caption = local_fallback(topic, content_format)
         model = "local-fallback"
 
     image = get_unsplash_photo(
-        rubric
+        rubric,
+        content_format,
     )
 
-    if publish(
-        caption,
-        image,
-    ):
+    if publish(caption, image):
         record_success(
             topic,
             rubric,
             model,
             caption,
+            content_format,
+            style_variant,
         )
         persist_history_to_git()
 
         log.info(
-            "🎉 V8.4 завершил работу успешно"
+            "🎉 V8.5 завершил работу успешно | %s | %s",
+            profile["name"],
+            topic,
         )
 
         return 0
 
-    log.error(
-        "❌ Пост не опубликован"
-    )
-
+    log.error("❌ Пост не опубликован")
     return 1
 
 
