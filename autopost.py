@@ -12,8 +12,8 @@ import requests
 from dotenv import load_dotenv
 
 # ============================================================
-# V8.6 — TELEGRAM CONTENT ENGINE
-# 7 форматов контента + усиленный анти-повтор смысловых углов + failover + Telegram HTML
+# V8.7 — TELEGRAM CONTENT ENGINE
+# 7 форматов контента + анти-повтор тем и углов подачи + failover + Telegram HTML
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -59,7 +59,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("autopost-v8.6")
+log = logging.getLogger("autopost-v8.7")
 
 
 # ============================================================
@@ -243,6 +243,59 @@ CONTENT_FORMATS = {
     5: "mini_test",
     6: "weekly_reflection",
 }
+
+CONTENT_ANGLES = {
+    "management_breakdown": [
+        "через раннее распознавание проблемы",
+        "через пошаговый алгоритм действий руководителя",
+        "через типичную ошибку в этой ситуации",
+        "через границы ответственности руководителя и сотрудника",
+        "через один вопрос, который быстро проясняет ситуацию",
+    ],
+    "practical_tool": [
+        "через готовый алгоритм, который можно применить сегодня",
+        "через готовую фразу руководителя",
+        "через короткий чек-лист перед действием",
+        "через точку контроля без микроменеджмента",
+        "через сравнение плохого и хорошего способа",
+    ],
+    "psychology_story": [
+        "через внутреннюю реакцию руководителя",
+        "через скрытую причину привычной реакции",
+        "через последствия реакции для команды",
+        "через момент, когда руководитель может остановить автоматическую реакцию",
+        "через спокойный самоанализ после сложной ситуации",
+    ],
+    "dialogue_case": [
+        "через конфликт ожиданий",
+        "через неудачную первую реплику руководителя",
+        "через перевод спора в решение",
+        "через границы ответственности в разговоре",
+        "через вопрос, который меняет ход разговора",
+    ],
+    "management_mistake": [
+        "через ошибочную, но логичную реакцию руководителя",
+        "через скрытую причину управленческой ошибки",
+        "через последствия ошибки для самостоятельности команды",
+        "через то, чем заменить привычную реакцию",
+        "через один ранний сигнал, который помогает заметить ошибку",
+    ],
+    "mini_test": [
+        "через самодиагностику руководителя",
+        "через признаки микроменеджмента",
+        "через качество делегирования",
+        "через самостоятельность команды",
+        "через управленческие привычки, которые незаметно забирают время",
+    ],
+    "weekly_reflection": [
+        "через одну задачу, которую пора перестать держать на себе",
+        "через разговор, который нельзя бесконечно откладывать",
+        "через решение, которое оказалось важнее срочных задач",
+        "через изменение самостоятельности команды",
+        "через один управленческий вывод недели",
+    ],
+}
+
 
 FORMAT_PROFILES = {
     "management_breakdown": {
@@ -701,7 +754,64 @@ def choose_topic(candidates, rubric):
     return selected["topic"]
 
 
-def record_success(topic, rubric, model, text, content_format, style_variant):
+def choose_content_angle(topic, content_format):
+    """
+    Выбирает угол подачи отдельно от темы.
+    Одна тема может возвращаться через месяцы, но ближайшие публикации
+    не должны повторять один и тот же способ её раскрытия.
+    """
+    angles = CONTENT_ANGLES.get(content_format, [])
+    if not angles:
+        return ""
+
+    history = recent_history()
+    scored = []
+
+    for angle in angles:
+        penalty = 0
+
+        for item in history:
+            old_angle = item.get("content_angle", "")
+            if not old_angle or old_angle != angle:
+                continue
+
+            topic_sim = similarity_percent(
+                topic,
+                item.get("topic", ""),
+            )
+
+            if topic_sim >= 55:
+                penalty += 100
+            elif topic_sim >= 35:
+                penalty += 45
+            else:
+                penalty += 12
+
+        scored.append((penalty, angle))
+
+    best_penalty = min(item[0] for item in scored)
+    best = [item for item in scored if item[0] == best_penalty]
+    selected = random.choice(best)[1]
+
+    log.info(
+        "🎯 Угол подачи: %s | формат=%s | penalty=%s",
+        selected,
+        content_format,
+        best_penalty,
+    )
+
+    return selected
+
+
+def record_success(
+    topic,
+    rubric,
+    model,
+    text,
+    content_format,
+    style_variant,
+    content_angle,
+):
     items = load_history()
 
     items.append({
@@ -709,9 +819,10 @@ def record_success(topic, rubric, model, text, content_format, style_variant):
         "rubric": rubric,
         "content_format": content_format,
         "style_variant": style_variant,
+        "content_angle": content_angle,
         "model": model,
         "published_at": datetime.now(timezone.utc).isoformat(),
-        "fingerprint": normalize_topic(text)[:300],
+        "fingerprint": normalize_topic(text)[:500],
     })
 
     save_history(items)
@@ -892,7 +1003,7 @@ def valid_basic_html(text):
 # GEMINI
 # ============================================================
 
-def build_prompt(topic, rubric, content_format, style_variant=0, repair=False):
+def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="", repair=False):
     profile = FORMAT_PROFILES[content_format]
     min_chars, max_chars = profile["range"]
     emoji_min, emoji_max = profile["emoji_range"]
@@ -919,6 +1030,7 @@ def build_prompt(topic, rubric, content_format, style_variant=0, repair=False):
 Рубрика: {rubric}
 Тема: {topic}
 Редакционный формат: {profile["name"]}
+Угол подачи: {content_angle}
 
 {profile["instruction"]}
 
@@ -1291,7 +1403,7 @@ def score_post(text, topic, content_format):
     return min(score, 100), reasons
 
 
-def generate_with_failover(topic, rubric, content_format, style_variant=0):
+def generate_with_failover(topic, rubric, content_format, style_variant=0, content_angle=""):
     profile = FORMAT_PROFILES[content_format]
 
     for model in GEMINI_MODELS:
@@ -1304,6 +1416,7 @@ def generate_with_failover(topic, rubric, content_format, style_variant=0):
                 rubric,
                 content_format,
                 style_variant=style_variant,
+                content_angle=content_angle,
                 repair=repair,
             )
 
@@ -1696,7 +1809,7 @@ def persist_history_to_git():
 # ============================================================
 
 def main():
-    print("🚀 TELEGRAM CONTENT ENGINE V8.6")
+    print("🚀 TELEGRAM CONTENT ENGINE V8.7")
     print(
         "🤖 Gemini failover:",
         " → ".join(GEMINI_MODELS),
@@ -1761,11 +1874,17 @@ def main():
         rubric,
     )
 
+    content_angle = choose_content_angle(
+        topic,
+        content_format,
+    )
+
     generated, model = generate_with_failover(
         topic,
         rubric,
         content_format,
         style_variant=style_variant,
+        content_angle=content_angle,
     )
 
     if generated:
@@ -1803,11 +1922,12 @@ def main():
             caption,
             content_format,
             style_variant,
+            content_angle,
         )
         persist_history_to_git()
 
         log.info(
-            "🎉 V8.6 завершил работу успешно | %s | %s",
+            "🎉 V8.7 завершил работу успешно | %s | %s",
             profile["name"],
             topic,
         )
