@@ -535,8 +535,7 @@ FORMAT_PROFILES = {
 
 # ============================================================
 # ВИЗУАЛЬНАЯ СЕТКА ЛЕНТЫ V8.9
-# Фото используются 2 раза в неделю, остальные публикации — text-only.
-# Дни фото меняются по неделям, чтобы визуальный ритм не повторялся.
+# Чередуем фото и text-only, чтобы вся лента не выглядела одинаково.
 # ============================================================
 
 MEDIA_MODES = {
@@ -544,8 +543,8 @@ MEDIA_MODES = {
     "text": {"name": "Text-only"},
 }
 
-MEDIA_SCHEDULE_A = ["photo", "text", "text", "text", "photo", "text", "text"]
-MEDIA_SCHEDULE_B = ["text", "text", "photo", "text", "text", "photo", "text"]
+MEDIA_SCHEDULE_A = ["photo", "photo", "text", "photo", "text", "photo", "text"]
+MEDIA_SCHEDULE_B = ["text", "photo", "photo", "text", "photo", "text", "photo"]
 
 # ============================================================
 # ИСТОРИЯ
