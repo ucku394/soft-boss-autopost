@@ -48,9 +48,9 @@ TELEGRAM_TIMEOUT = 40
 UNSPLASH_TIMEOUT = 25
 
 HISTORY_WEEKS = 12
-MAX_CAPTION = 900
-TELEGRAM_CAPTION_LIMIT = 1024
-MAX_GENERATED_CHARS = 900
+MAX_CAPTION = 4000
+TELEGRAM_CAPTION_LIMIT = 4096
+MAX_GENERATED_CHARS = 4000
 MAX_GENERATION_ATTEMPTS_PER_MODEL = 2
 THINKING_LEVEL = "low"
 QUALITY_THRESHOLD = 75
@@ -344,7 +344,7 @@ VISUAL_STYLE_PROFILES = {
 FORMAT_PROFILES = {
     "management_breakdown": {
         "name": "Разбор управленческой ситуации",
-        "range": (500, 760),
+        "range": (900, 1400),
         "emoji_range": (3, 5),
         "instruction": """
 ФОРМАТ: РАЗБОР УПРАВЛЕНЧЕСКОЙ СИТУАЦИИ.
@@ -373,7 +373,7 @@ FORMAT_PROFILES = {
     },
     "practical_tool": {
         "name": "Практический инструмент",
-        "range": (480, 780),
+        "range": (900, 1500),
         "emoji_range": (3, 6),
         "instruction": """
 ФОРМАТ: ПРАКТИЧЕСКИЙ ИНСТРУМЕНТ.
@@ -404,7 +404,7 @@ FORMAT_PROFILES = {
     },
     "psychology_story": {
         "name": "Психологическая мини-история",
-        "range": (480, 780),
+        "range": (900, 1500),
         "emoji_range": (2, 4),
         "instruction": """
 ФОРМАТ: ПСИХОЛОГИЧЕСКАЯ МИНИ-ИСТОРИЯ.
@@ -430,7 +430,7 @@ FORMAT_PROFILES = {
     },
     "dialogue_case": {
         "name": "Диалог и разбор кейса",
-        "range": (500, 800),
+        "range": (900, 1500),
         "emoji_range": (2, 4),
         "instruction": """
 ФОРМАТ: ДИАЛОГ И РАЗБОР КЕЙСА.
@@ -457,7 +457,7 @@ FORMAT_PROFILES = {
     },
     "management_mistake": {
         "name": "Ошибка руководителя",
-        "range": (480, 760),
+        "range": (900, 1400),
         "emoji_range": (3, 5),
         "instruction": """
 ФОРМАТ: ОШИБКА РУКОВОДИТЕЛЯ.
@@ -482,7 +482,7 @@ FORMAT_PROFILES = {
     },
     "mini_test": {
         "name": "Мини-тест",
-        "range": (480, 760),
+        "range": (900, 1400),
         "emoji_range": (4, 8),
         "instruction": """
 ФОРМАТ: МИНИ-ТЕСТ.
@@ -508,7 +508,7 @@ FORMAT_PROFILES = {
     },
     "weekly_reflection": {
         "name": "Недельная рефлексия",
-        "range": (400, 650),
+        "range": (800, 1200),
         "emoji_range": (1, 3),
         "instruction": """
 ФОРМАТ: НЕДЕЛЬНАЯ РЕФЛЕКСИЯ.
