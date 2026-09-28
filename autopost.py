@@ -48,9 +48,17 @@ TELEGRAM_TIMEOUT = 40
 UNSPLASH_TIMEOUT = 25
 
 HISTORY_WEEKS = 12
-MAX_CAPTION = 4000
-TELEGRAM_CAPTION_LIMIT = 4096
-MAX_GENERATED_CHARS = 4000
+
+# Telegram: подпись к фото короче обычного текстового сообщения.
+TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
+TELEGRAM_TEXT_LIMIT = 4096
+
+# Целевой объём зависит от media_mode.
+PHOTO_POST_RANGE = (650, 950)
+TEXT_POST_RANGE = (1600, 2600)
+
+MAX_CAPTION = TELEGRAM_TEXT_LIMIT
+MAX_GENERATED_CHARS = TELEGRAM_TEXT_LIMIT
 MAX_GENERATION_ATTEMPTS_PER_MODEL = 2
 THINKING_LEVEL = "low"
 QUALITY_THRESHOLD = 75
@@ -344,7 +352,7 @@ VISUAL_STYLE_PROFILES = {
 FORMAT_PROFILES = {
     "management_breakdown": {
         "name": "Разбор управленческой ситуации",
-        "range": (900, 1400),
+        "range": (500, 760),
         "emoji_range": (3, 5),
         "instruction": """
 ФОРМАТ: РАЗБОР УПРАВЛЕНЧЕСКОЙ СИТУАЦИИ.
@@ -373,7 +381,7 @@ FORMAT_PROFILES = {
     },
     "practical_tool": {
         "name": "Практический инструмент",
-        "range": (900, 1500),
+        "range": (480, 780),
         "emoji_range": (3, 6),
         "instruction": """
 ФОРМАТ: ПРАКТИЧЕСКИЙ ИНСТРУМЕНТ.
@@ -404,7 +412,7 @@ FORMAT_PROFILES = {
     },
     "psychology_story": {
         "name": "Психологическая мини-история",
-        "range": (900, 1500),
+        "range": (480, 780),
         "emoji_range": (2, 4),
         "instruction": """
 ФОРМАТ: ПСИХОЛОГИЧЕСКАЯ МИНИ-ИСТОРИЯ.
@@ -430,7 +438,7 @@ FORMAT_PROFILES = {
     },
     "dialogue_case": {
         "name": "Диалог и разбор кейса",
-        "range": (900, 1500),
+        "range": (500, 800),
         "emoji_range": (2, 4),
         "instruction": """
 ФОРМАТ: ДИАЛОГ И РАЗБОР КЕЙСА.
@@ -457,7 +465,7 @@ FORMAT_PROFILES = {
     },
     "management_mistake": {
         "name": "Ошибка руководителя",
-        "range": (900, 1400),
+        "range": (480, 760),
         "emoji_range": (3, 5),
         "instruction": """
 ФОРМАТ: ОШИБКА РУКОВОДИТЕЛЯ.
@@ -482,7 +490,7 @@ FORMAT_PROFILES = {
     },
     "mini_test": {
         "name": "Мини-тест",
-        "range": (900, 1400),
+        "range": (480, 760),
         "emoji_range": (4, 8),
         "instruction": """
 ФОРМАТ: МИНИ-ТЕСТ.
@@ -508,7 +516,7 @@ FORMAT_PROFILES = {
     },
     "weekly_reflection": {
         "name": "Недельная рефлексия",
-        "range": (800, 1200),
+        "range": (400, 650),
         "emoji_range": (1, 3),
         "instruction": """
 ФОРМАТ: НЕДЕЛЬНАЯ РЕФЛЕКСИЯ.
@@ -1114,10 +1122,30 @@ def valid_basic_html(text):
 # GEMINI
 # ============================================================
 
-def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="", visual_style="", repair=False):
+def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="", visual_style="", media_mode="photo", repair=False):
     profile = FORMAT_PROFILES[content_format]
     visual_profile = VISUAL_STYLE_PROFILES.get(visual_style, VISUAL_STYLE_PROFILES["classic"])
-    min_chars, max_chars = profile["range"]
+
+    if media_mode == "text":
+        min_chars, max_chars = TEXT_POST_RANGE
+        media_instruction = """
+МЕДИА-РЕЖИМ: TEXT-ONLY.
+Это полноценный самостоятельный текстовый пост без фотографии. Раскрой тему глубже:
+— добавь конкретный рабочий контекст или мини-сценарий;
+— объясни не только «что делать», но и почему это работает;
+— добавь практические детали, которые руководитель сможет применить;
+— используй 5–8 смысловых блоков, но не превращай текст в длинную лекцию.
+Целевой объём: 1600–2600 символов.
+"""
+    else:
+        min_chars, max_chars = PHOTO_POST_RANGE
+        media_instruction = """
+МЕДИА-РЕЖИМ: ФОТО.
+Текст сопровождается фотографией, поэтому он должен быть компактным и легко читаться прямо под изображением.
+Целевой объём: 650–950 символов.
+"""
+
+    max_allowed = TELEGRAM_TEXT_LIMIT if media_mode == "text" else TELEGRAM_PHOTO_CAPTION_LIMIT
     emoji_min, emoji_max = visual_profile["emoji_range"]
 
     style_variants = [
@@ -1161,6 +1189,8 @@ def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="
 - Не морализируй и не обвиняй сотрудников или руководителей.
 - {opening_style}
 
+{media_instruction}
+
 ВИЗУАЛЬНЫЙ РИТМ:
 - Используй {emoji_min}–{emoji_max} уместных эмодзи.
 - Не ставь эмодзи в каждой строке.
@@ -1174,7 +1204,7 @@ def build_prompt(topic, rubric, content_format, style_variant=0, content_angle="
 
 ОБЪЁМ:
 - Целевой диапазон: {min_chars}–{max_chars} символов.
-- Абсолютный максимум: {MAX_CAPTION} символов.
+- Абсолютный максимум: {max_allowed} символов.
 
 ФИНАЛ:
 - Заверши мысль до блока хэштегов.
@@ -1271,19 +1301,24 @@ def last_content_line(text):
     return lines[-1] if lines else ""
 
 
-def looks_like_complete_post(text, finish_reason="", content_format="management_breakdown"):
+def looks_like_complete_post(text, finish_reason="", content_format="management_breakdown", media_mode="photo"):
     """Проверяет завершённость поста с учётом длины конкретного формата."""
     if not text:
         return False
 
     clean = sanitize_telegram_html(text)
     plain = strip_html(clean).strip()
-    min_chars, max_chars = FORMAT_PROFILES[content_format]["range"]
+    if media_mode == "text":
+        min_chars, max_chars = TEXT_POST_RANGE
+        max_allowed = TELEGRAM_TEXT_LIMIT
+    else:
+        min_chars, max_chars = PHOTO_POST_RANGE
+        max_allowed = TELEGRAM_PHOTO_CAPTION_LIMIT
 
     if finish_reason.upper() in {"MAX_TOKENS", "LENGTH"}:
         return False
 
-    if len(plain) < max(350, min_chars - 50) or len(plain) > MAX_CAPTION:
+    if len(plain) < max(350, min_chars - 50) or len(plain) > max_allowed:
         return False
 
     body, hashtags = split_hashtags(clean)
@@ -1454,13 +1489,17 @@ def format_quality_score(text, content_format):
     return min(score, 18), reasons
 
 
-def score_post(text, topic, content_format):
-    """Локальная оценка качества с учётом конкретного формата."""
+def score_post(text, topic, content_format, media_mode="photo"):
+    """Локальная оценка качества с учётом формата и media_mode."""
     clean = sanitize_telegram_html(text)
     plain = strip_html(clean).strip()
     body, hashtags = split_hashtags(clean)
     profile = FORMAT_PROFILES[content_format]
-    min_chars, max_chars = profile["range"]
+
+    if media_mode == "text":
+        min_chars, max_chars = TEXT_POST_RANGE
+    else:
+        min_chars, max_chars = PHOTO_POST_RANGE
 
     score = 0
     reasons = []
@@ -1517,7 +1556,7 @@ def score_post(text, topic, content_format):
     return min(score, 100), reasons
 
 
-def generate_with_failover(topic, rubric, content_format, style_variant=0, content_angle="", visual_style=""):
+def generate_with_failover(topic, rubric, content_format, style_variant=0, content_angle="", visual_style="", media_mode="photo"):
     profile = FORMAT_PROFILES[content_format]
 
     for model in GEMINI_MODELS:
@@ -1532,6 +1571,7 @@ def generate_with_failover(topic, rubric, content_format, style_variant=0, conte
                 style_variant=style_variant,
                 content_angle=content_angle,
                 visual_style=visual_style,
+                media_mode=media_mode,
                 repair=repair,
             )
 
@@ -1554,11 +1594,13 @@ def generate_with_failover(topic, rubric, content_format, style_variant=0, conte
                         text,
                         finish_reason,
                         content_format,
+                        media_mode=media_mode,
                     ):
                         quality, reasons = score_post(
                             text,
                             topic,
                             content_format,
+                            media_mode=media_mode,
                         )
 
                         log.info(
@@ -1853,8 +1895,15 @@ def publish(caption, image):
         caption
     )
 
+    max_len = (
+        TELEGRAM_PHOTO_CAPTION_LIMIT
+        if image
+        else TELEGRAM_TEXT_LIMIT
+    )
+
     caption = fit_caption(
-        caption
+        caption,
+        max_len=max_len,
     )
 
     if not valid_basic_html(caption):
@@ -2028,11 +2077,19 @@ def main():
         style_variant=style_variant,
         content_angle=content_angle,
         visual_style=visual_style,
+        media_mode=media_mode,
     )
 
     if generated:
         caption = sanitize_telegram_html(generated)
-        fitted = fit_caption(caption)
+        fitted = fit_caption(
+            caption,
+            max_len=(
+                TELEGRAM_TEXT_LIMIT
+                if media_mode == "text"
+                else TELEGRAM_PHOTO_CAPTION_LIMIT
+            ),
+        )
 
         if not fitted:
             log.warning(
