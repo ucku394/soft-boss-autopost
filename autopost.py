@@ -1234,7 +1234,7 @@ def gemini_request(model, prompt):
         "generationConfig": {
             # Gemini 3.x тратит maxOutputTokens также на thinking tokens.
             # Для короткого Telegram-поста low существенно снижает риск MAX_TOKENS.
-            "maxOutputTokens": 1600,
+            "maxOutputTokens": 2400,
             "thinkingConfig": {
                 "thinkingLevel": THINKING_LEVEL,
             },
